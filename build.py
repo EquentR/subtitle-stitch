@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -150,6 +151,34 @@ def run(cmd, cfg, label=None, allow_fail=False):
     return r
 
 
+def aapt2_can_write(cfg, out_dir):
+    """Probe whether aapt2 can create its .flat output inside out_dir."""
+    probe = os.path.join(out_dir, '_aapt2_probe')
+    try:
+        if os.path.isdir(probe):
+            shutil.rmtree(probe)
+        os.makedirs(probe)
+    except OSError:
+        return False
+    sample = None
+    for base, _d, files in os.walk(os.path.join(ROOT, 'res')):
+        for f in files:
+            sample = os.path.join(base, f)
+            break
+        if sample:
+            break
+    if not sample:
+        return True
+    env = dict(os.environ)
+    if cfg.java_home:
+        env['JAVA_HOME'] = cfg.java_home
+    r = subprocess.run([cfg.build_tool('aapt2.exe'), 'compile', '-o', probe, sample],
+                       env=env, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
+    shutil.rmtree(probe, ignore_errors=True)
+    return r.returncode == 0
+
+
 def walk_sources(*dirs):
     out = []
     for d in dirs:
@@ -192,12 +221,41 @@ def main():
     ap.add_argument('--ks-alias', dest='ks_alias')
     ap.add_argument('--key', dest='key', help='PKCS#8 PEM private key')
     ap.add_argument('--cert', dest='cert', help='X.509 PEM certificate')
+    ap.add_argument('--out', dest='out_dir',
+                    help='build output directory (default: <project>/build)')
     ap.add_argument('--serial', help='adb device serial')
     ap.add_argument('--adb', default='adb')
     args = ap.parse_args()
 
+    global OUT
+    if args.out_dir:
+        OUT = os.path.abspath(args.out_dir)
+    elif os.environ.get('STITCH_OUT_DIR'):
+        OUT = os.path.abspath(os.environ['STITCH_OUT_DIR'])
+
     cfg = Config(args)
     cfg.validate()
+
+    # aapt2 cannot create its intermediate .flat files in some directories on
+    # Windows ("failed to open file" although ordinary writes succeed). Probe
+    # once and fall back automatically so a fresh clone never fails this way.
+    if not aapt2_can_write(cfg, OUT):
+        fallback = os.path.join(tempfile.gettempdir(), 'subtitlestitch-build')
+        if args.out_dir or os.environ.get('STITCH_OUT_DIR'):
+            print('WARNING: aapt2 failed its write probe in %s' % OUT)
+        elif aapt2_can_write(cfg, fallback):
+            print('NOTE: aapt2 cannot write into %s' % os.path.join(ROOT, 'build'))
+            print('      falling back to %s' % fallback)
+            OUT = fallback
+        else:
+            print('ERROR: aapt2 cannot create its intermediate files in either')
+            print('  %s' % os.path.join(ROOT, 'build'))
+            print('  %s' % fallback)
+            print('\nThis is a local filesystem restriction, not a project problem.')
+            print('Point the build at a directory aapt2 can write to:')
+            print('  python build.py --out D:/build/subtitlestitch')
+            sys.exit(3)
+    print('build output dir: %s' % OUT)
 
     gen = os.path.join(OUT, 'gen')
     classes = os.path.join(OUT, 'classes')
@@ -211,6 +269,8 @@ def main():
         if os.path.isdir(d):
             shutil.rmtree(d)
         os.makedirs(d)
+    # aapt2 compile writes its .flat output here, so create it up front
+    os.makedirs(os.path.join(OUT, 'res-compiled'), exist_ok=True)
     for f in (reszip, unsigned, aligned, final):
         if os.path.exists(f):
             os.remove(f)
