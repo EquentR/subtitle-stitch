@@ -1,4 +1,4 @@
-package com.dsh.subtitlestitch;
+package com.equentr.subtitlestitch;
 
 import android.content.ContentUris;
 import android.content.Context;

@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # android.jar and the build-tools are required by build.sh
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+          # build-tools ship as a zip; make sure the binaries are executable
+          find "$ANDROID_SDK_ROOT/build-tools" -maxdepth 2 -type f \
+            \( -name aapt2 -o -name zipalign \) -exec chmod +x {} +
+
+      - name: Run unit tests
+        run: ./test.sh
+
+      - name: Build APK
+        run: |
+          chmod +x build.sh
+          ./build.sh --out "$RUNNER_TEMP/build"
+
+      - name: Verify signature
+        run: |
+          "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" verify \
+            --print-certs "$RUNNER_TEMP/build/SubtitleStitch.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SubtitleStitch-debug-apk
+          path: ${{ runner.temp }}/build/SubtitleStitch.apk
+          if-no-files-found: error

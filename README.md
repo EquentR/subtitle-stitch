@@ -104,16 +104,17 @@ PNG 是无损格式，需要对 350 万像素重新做 deflate 压缩。截图�
 
 ## 构建
 
-不需要 Gradle。`build.py` 直接调用 Android SDK 命令行工具：
+不需要 Gradle，也不需要 Python。构建脚本直接调用 Android SDK 命令行工具：
 
 ```
-aapt2 compile → aapt2 link → javac → d8 → 打包 → zipalign → apksigner
+aapt2 compile -> aapt2 link -> javac -> d8 -> 打包 -> zipalign -> apksigner
 ```
 
 ### 环境要求
 
 - JDK 17 或更高
 - Android SDK：`platforms;android-36`、`build-tools;36.0.0`
+- Linux / macOS 另需 `zip` 与 `unzip`
 
 ### 配置
 
@@ -124,20 +125,32 @@ sdk.dir=C:/Users/you/AppData/Local/Android/Sdk
 java.home=C:/Program Files/Java/jdk-21
 ```
 
-也可以用环境变量：`ANDROID_SDK_ROOT`、`JAVA_HOME`。
+也可以直接用环境变量：`ANDROID_SDK_ROOT`、`JAVA_HOME`。
 
 ### 构建
 
+**Windows**
+
+```bat
+build.bat
+build.bat --release
+build.bat --install
+build.bat --out D:\build\stitch
+```
+
+**Linux / macOS**
+
 ```bash
-python build.py              # 构建（用自动生成的 debug 密钥签名）
-python build.py --release    # 标记为 release 构建
-python build.py --install    # 构建并安装到已连接设备
-python build.py --out D:/build/stitch   # 指定输出目录
+chmod +x build.sh
+./build.sh
+./build.sh --release
+./build.sh --install
+./build.sh --out /tmp/stitch
 ```
 
 首次构建会自动生成 `build/debug.keystore`，因此克隆后可直接构建。
 
-> **Windows 注意**：个别目录下 aapt2 无法创建中间文件（报 `failed to open file`，即使普通写入正常）。`build.py` 会自动探测并回退到临时目录，也可用 `--out` 显式指定。
+> **Windows 注意**：个别目录下 aapt2 无法创建中间文件（报 `failed to open file`，即使普通写入正常）。如果遇到，用 `--out` 指定其他输出目录。
 
 ### 正式签名
 
@@ -149,12 +162,15 @@ keystore.pass=yourpassword
 keystore.alias=release
 ```
 
+或使用环境变量：`STITCH_KEYSTORE`、`STITCH_KS_PASS`、`STITCH_KS_ALIAS`。
+
 > 密钥库和 `local.properties` 都不应提交到仓库（已在 `.gitignore` 中排除）。
 
 ## 测试
 
 ```bash
-python run_tests.py
+test.bat        # Windows
+./test.sh       # Linux / macOS
 ```
 
 纯桌面 JVM 单元测试，不需要设备，覆盖：
@@ -168,6 +184,10 @@ python run_tests.py
 当前状态：**25 项全部通过**。
 
 运行测试只需 `android.jar` 作编译期 classpath，测试代码运行时不触碰任何 Android 类。
+
+## 持续集成
+
+`.github/workflows/build.yml` 在每次 push 和 PR 时运行测试并构建 APK，产物可在 Actions 的 artifact 中下载。
 
 ## 代码结构
 

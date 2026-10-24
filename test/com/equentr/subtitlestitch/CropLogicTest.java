@@ -1,4 +1,4 @@
-package com.dsh.subtitlestitch;
+package com.equentr.subtitlestitch;
 
 /**
  * Pure-logic tests for the crop model, runnable on a desktop JVM.
@@ -7,7 +7,7 @@ package com.dsh.subtitlestitch;
  * arithmetic and the "first full, rest linked" rules are plain Java and are
  * where the subtle bugs live, so they are worth pinning down.
  *
- * Run:  java -cp out com.dsh.subtitlestitch.CropLogicTest
+ * Run:  java -cp out com.equentr.subtitlestitch.CropLogicTest
  * Exit code 0 = all passed.
  */
 public final class CropLogicTest {

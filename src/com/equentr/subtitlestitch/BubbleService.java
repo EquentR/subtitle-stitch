@@ -1,4 +1,4 @@
-package com.dsh.subtitlestitch;
+package com.equentr.subtitlestitch;
 
 import android.app.Service;
 import android.content.Context;
@@ -32,10 +32,10 @@ import android.widget.TextView;
  */
 public class BubbleService extends Service {
 
-    public static final String ACTION_SHOW_BADGE = "com.dsh.subtitlestitch.SHOW_BADGE";
+    public static final String ACTION_SHOW_BADGE = "com.equentr.subtitlestitch.SHOW_BADGE";
     public static final String EXTRA_COUNT = "count";
-    public static final String ACTION_HIDE_BADGE = "com.dsh.subtitlestitch.HIDE_BADGE";
-    public static final String ACTION_HIDE_FOR = "com.dsh.subtitlestitch.HIDE_FOR";
+    public static final String ACTION_HIDE_BADGE = "com.equentr.subtitlestitch.HIDE_BADGE";
+    public static final String ACTION_HIDE_FOR = "com.equentr.subtitlestitch.HIDE_FOR";
     public static final String EXTRA_HIDE_MS = "hide_ms";
     /** Set when the user explicitly asked for the bubble (notification action). */
     public static final String EXTRA_FORCE = "force_show";

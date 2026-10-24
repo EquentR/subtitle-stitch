@@ -1,4 +1,4 @@
-package com.dsh.subtitlestitch;
+package com.equentr.subtitlestitch;
 
 import android.content.Intent;
 import android.graphics.drawable.Icon;

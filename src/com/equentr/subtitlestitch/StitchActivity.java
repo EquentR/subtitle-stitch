@@ -1,4 +1,4 @@
-package com.dsh.subtitlestitch;
+package com.equentr.subtitlestitch;
 
 import android.app.Activity;
 import android.app.ProgressDialog;

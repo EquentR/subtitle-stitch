@@ -1,4 +1,4 @@
-package com.dsh.subtitlestitch;
+package com.equentr.subtitlestitch;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -38,15 +38,15 @@ public class ShotWatcherService extends Service {
     private static final String TAG = "SubtitleStitch";
     public static final String CHANNEL_ID = "shot_watcher";
     public static final int NOTIFICATION_ID = 1001;
-    public static final String ACTION_START = "com.dsh.subtitlestitch.START_WATCH";
-    public static final String ACTION_STOP = "com.dsh.subtitlestitch.STOP_WATCH";
-    public static final String ACTION_CLEAR = "com.dsh.subtitlestitch.CLEAR_SHOTS";
+    public static final String ACTION_START = "com.equentr.subtitlestitch.START_WATCH";
+    public static final String ACTION_STOP = "com.equentr.subtitlestitch.STOP_WATCH";
+    public static final String ACTION_CLEAR = "com.equentr.subtitlestitch.CLEAR_SHOTS";
     /** Notification action: bring the floating bubble back. */
-    public static final String ACTION_SHOW_BUBBLE = "com.dsh.subtitlestitch.SHOW_BUBBLE";
+    public static final String ACTION_SHOW_BUBBLE = "com.equentr.subtitlestitch.SHOW_BUBBLE";
     /** Notification action: hide the floating bubble. */
-    public static final String ACTION_HIDE_BUBBLE = "com.dsh.subtitlestitch.HIDE_BUBBLE";
+    public static final String ACTION_HIDE_BUBBLE = "com.equentr.subtitlestitch.HIDE_BUBBLE";
     /** Notification action: open the stitch editor directly. */
-    public static final String ACTION_OPEN_STITCH = "com.dsh.subtitlestitch.OPEN_STITCH";
+    public static final String ACTION_OPEN_STITCH = "com.equentr.subtitlestitch.OPEN_STITCH";
 
     /** Shots captured since the watcher started. Mirrored to ShotStore. */
     private static final List<MediaStoreUtil.Shot> sCaptured =
