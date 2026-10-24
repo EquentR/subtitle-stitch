@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Dark-mode override: the same theme name resolves to the dark variant, so
+        every screen using @style/AppTheme follows the system night setting.
+    -->
+    <style name="AppTheme" parent="@style/AppTheme_Dark" />
+</resources>

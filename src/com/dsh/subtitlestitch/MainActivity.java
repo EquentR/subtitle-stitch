@@ -34,6 +34,7 @@ public class MainActivity extends Activity {
     private Button watchToggleBtn;
     private Button openFromCaptured;
     private Button projectionBtn;
+    private Button bubbleBtn;
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
 
     /** Set while the system capture-consent dialog is on screen. */
@@ -116,6 +117,12 @@ public class MainActivity extends Activity {
                 android.media.projection.MediaProjection p =
                         ScreenCapture.MediaProjectionHolder.create(this, resultCode, consentData);
                 android.util.Log.i("SubtitleStitch", "projection created: " + p);
+                // Open the single long-lived capture session now; every later
+                // screenshot reads a frame from it instead of creating a new
+                // VirtualDisplay (which Android 14+ forbids and punishes by
+                // revoking the projection).
+                ScreenCapture.closeSession();
+                ScreenCapture.openSession(this, p);
                 ShotWatcherService.onConsentGranted(this);
                 toast("已授权截屏，可以点悬浮球上的圆点截图");
             } catch (Throwable e) {
@@ -187,6 +194,29 @@ public class MainActivity extends Activity {
         }
     };
 
+    /** True when the active configuration is dark. */
+    private boolean isDark() {
+        int mode = getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        return mode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private int cText() {
+        return isDark() ? Color.parseColor("#E8EAED") : Color.parseColor("#1B1F24");
+    }
+
+    private int cSubtle() {
+        return isDark() ? Color.parseColor("#9AA0A6") : Color.parseColor("#6B7280");
+    }
+
+    private int cCard() {
+        return isDark() ? Color.parseColor("#1F2226") : Color.WHITE;
+    }
+
+    private int cPage() {
+        return isDark() ? Color.parseColor("#111316") : Color.parseColor("#F5F6F8");
+    }
+
     private int dp(float v) {
         return (int) android.util.TypedValue.applyDimension(
                 android.util.TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
@@ -201,7 +231,7 @@ public class MainActivity extends Activity {
         int baseTop = dp(24);
         int baseBottom = dp(24);
         root.setPadding(dp(20), baseTop, dp(20), baseBottom);
-        root.setBackgroundColor(Color.parseColor("#F5F6F8"));
+        root.setBackgroundColor(cPage());
         if (Build.VERSION.SDK_INT >= 23) {
             root.setOnApplyWindowInsetsListener((v, insets) -> {
                 android.graphics.Insets bars = android.graphics.Insets.NONE;
@@ -227,14 +257,14 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText("字幕拼接");
         title.setTextSize(24);
-        title.setTextColor(Color.parseColor("#1B1F24"));
+        title.setTextColor(cText());
         title.setGravity(Gravity.START);
         root.addView(title);
 
         TextView sub = new TextView(this);
         sub.setText("把多张截图纵向拼成一张长图，保留台词字幕");
         sub.setTextSize(13);
-        sub.setTextColor(Color.parseColor("#6B7280"));
+        sub.setTextColor(cSubtle());
         sub.setPadding(0, dp(4), 0, dp(18));
         root.addView(sub);
 
@@ -243,12 +273,12 @@ public class MainActivity extends Activity {
         TextView permTitle = new TextView(this);
         permTitle.setText("① 所需权限");
         permTitle.setTextSize(15);
-        permTitle.setTextColor(Color.parseColor("#1B1F24"));
+        permTitle.setTextColor(cText());
         card.addView(permTitle);
 
         statusText = new TextView(this);
         statusText.setTextSize(13);
-        statusText.setTextColor(Color.parseColor("#6B7280"));
+        statusText.setTextColor(cSubtle());
         statusText.setPadding(0, dp(6), 0, dp(10));
         card.addView(statusText);
 
@@ -261,13 +291,13 @@ public class MainActivity extends Activity {
         TextView watchTitle = new TextView(this);
         watchTitle.setText("② 自动捕获截图");
         watchTitle.setTextSize(15);
-        watchTitle.setTextColor(Color.parseColor("#1B1F24"));
+        watchTitle.setTextColor(cText());
         card2.addView(watchTitle);
 
         TextView watchDesc = new TextView(this);
         watchDesc.setText("开启后会在后台监听新截图，并弹出悬浮球提醒");
         watchDesc.setTextSize(13);
-        watchDesc.setTextColor(Color.parseColor("#6B7280"));
+        watchDesc.setTextColor(cSubtle());
         watchDesc.setPadding(0, dp(6), 0, dp(10));
         card2.addView(watchDesc);
 
@@ -288,6 +318,26 @@ public class MainActivity extends Activity {
         projectionBtn.setOnClickListener(v -> requestProjection());
         card2.addView(projectionBtn);
 
+        // Manual bubble switch: no need to hunt through the notification shade.
+        bubbleBtn = button("显示悬浮窗", false);
+        bubbleBtn.setOnClickListener(v -> {
+            boolean on = ShotStore.isBubbleEnabled(this);
+            if (!on && !BubbleService.canDrawOverlays(this)) {
+                BubbleService.requestOverlayPermission(this);
+                toast("请先允许「显示在其他应用上层」");
+                return;
+            }
+            ShotStore.setBubbleEnabled(this, !on);
+            if (!on) {
+                toast("悬浮窗已开启，退出 App 后会显示");
+            } else {
+                BubbleService.hideBadge(this);
+                toast("悬浮窗已关闭");
+            }
+            refreshState();
+        });
+        card2.addView(bubbleBtn);
+
         Button tileBtn = button("添加到控制中心快捷开关", false);
         tileBtn.setOnClickListener(v -> {
             WatchTileService.requestAddTile(this);
@@ -300,7 +350,7 @@ public class MainActivity extends Activity {
         TextView stitchTitle = new TextView(this);
         stitchTitle.setText("③ 开始拼接");
         stitchTitle.setTextSize(15);
-        stitchTitle.setTextColor(Color.parseColor("#1B1F24"));
+        stitchTitle.setTextColor(cText());
         card3.addView(stitchTitle);
 
         openFromCaptured = button("拼接已捕获的截图", true);
@@ -374,7 +424,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout card(LinearLayout parent) {        LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundColor(Color.WHITE);
+        c.setBackgroundColor(cCard());
         c.setPadding(dp(16), dp(16), dp(16), dp(16));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -395,8 +445,12 @@ public class MainActivity extends Activity {
             b.setBackgroundColor(Color.parseColor("#1F6FEB"));
             b.setTextColor(Color.WHITE);
         } else {
-            b.setBackgroundColor(Color.parseColor("#E8EEF9"));
-            b.setTextColor(Color.parseColor("#1F6FEB"));
+            // Secondary buttons need their own dark-mode tint; a fixed light blue
+            // looked out of place on the dark background.
+            b.setBackgroundColor(isDark()
+                    ? Color.parseColor("#232A33") : Color.parseColor("#E8EEF9"));
+            b.setTextColor(isDark()
+                    ? Color.parseColor("#8AB4F8") : Color.parseColor("#1F6FEB"));
         }
         return b;
     }
@@ -430,8 +484,16 @@ public class MainActivity extends Activity {
                 watchStateText.setTextColor(Color.parseColor("#1F6FEB"));
             } else {
                 watchStateText.setText("状态：未开启");
-                watchStateText.setTextColor(Color.parseColor("#6B7280"));
+                watchStateText.setTextColor(cSubtle());
             }
+        }
+        if (bubbleBtn != null) {
+            boolean on = ShotStore.isBubbleEnabled(this);
+            bubbleBtn.setText(on ? "✓ 悬浮窗已开启（点按关闭）" : "显示悬浮窗");
+            bubbleBtn.setBackgroundColor(isDark()
+                    ? Color.parseColor("#232A33") : Color.parseColor("#E8EEF9"));
+            bubbleBtn.setTextColor(isDark()
+                    ? Color.parseColor("#8AB4F8") : Color.parseColor("#1F6FEB"));
         }
         if (projectionBtn != null) {
             projectionBtn.setText(ScreenCapture.hasConsent(this)

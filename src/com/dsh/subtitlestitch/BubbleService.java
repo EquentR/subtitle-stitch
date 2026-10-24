@@ -3,6 +3,7 @@ package com.dsh.subtitlestitch;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -43,6 +44,21 @@ public class BubbleService extends Service {
     public static final long TEMP_HIDE_MS = 10_000L;
 
     private static boolean sVisible = false;
+
+    /**
+     * True while one of OUR activities is on screen. The bubble is only shown
+     * outside the app, so it never covers our own UI.
+     */
+    private static boolean sAppForeground = false;
+
+    /** Called by the Application class as activities start/stop. */
+    public static void setAppForeground(boolean foreground) {
+        sAppForeground = foreground;
+    }
+
+    public static boolean isAppForeground() {
+        return sAppForeground;
+    }
     private static boolean sSuppressAfterScreenshot = false;
 
     private WindowManager wm;
@@ -51,6 +67,8 @@ public class BubbleService extends Service {
     private TextView label;
     private TextView captureBtn;
     private int count;
+    /** true while a frame is being grabbed, prevents overlapping captures. */
+    private boolean capturing;
     private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
 
     /** Re-show the bubble after a temporary hide, unless it was hidden for good. */
@@ -119,6 +137,19 @@ public class BubbleService extends Service {
         ShotStore.setBubbleHidden(ctx, true);
     }
 
+    /** Update the badge counter without hiding or recreating the bubble. */
+    public static void refreshBadge(Context ctx) {
+        if (ShotStore.isBubbleHidden(ctx) || !canDrawOverlays(ctx)) {
+            return;
+        }
+        Intent i = new Intent(ctx, BubbleService.class);
+        i.setAction(ACTION_SHOW_BADGE);
+        i.putExtra(EXTRA_COUNT, ShotWatcherService.capturedCount());
+        try {
+            ctx.startService(i);
+        } catch (Exception ignored) { }
+    }
+
     /** Re-show the bubble (used by the notification action). */
     public static void showAgain(Context ctx) {
         sSuppressAfterScreenshot = false;
@@ -181,6 +212,12 @@ public class BubbleService extends Service {
         }
         if (!canDrawOverlays(this)) {
             stopSelf();
+            return START_NOT_STICKY;
+        }
+        // Never draw the bubble over our own screens.
+        if (sAppForeground) {
+            removeBubble();
+            sVisible = false;
             return START_NOT_STICKY;
         }
         boolean force = intent != null && intent.getBooleanExtra(EXTRA_FORCE, false);
@@ -395,33 +432,51 @@ public class BubbleService extends Service {
             }
             return;
         }
-        // 1+2: hide, let the compositor drop it
+        // 1+2: hide, then wait until the window is really gone. The compositor
+        // needs a couple of frames to stop drawing the overlay; grabbing too
+        // early baked the bubble -- or a black rectangle where it used to be --
+        // into the screenshot.
+        if (capturing) {
+            return;                    // already grabbing a frame
+        }
+        capturing = true;
         removeBubble();
         sVisible = false;
-        main.postDelayed(() -> doCaptureAndRestore(), 180);
+        // 120 ms is enough for the compositor to drop an overlay window; the
+        // previous 350 ms made rapid successive captures feel sluggish.
+        main.postDelayed(() -> doCaptureAndRestore(), 120);
     }
 
     private void doCaptureAndRestore() {
-        android.media.projection.MediaProjection projection = ScreenCapture.MediaProjectionHolder.get();
+        final ScreenCapture.Session session = ScreenCapture.MediaProjectionHolder.getSession();
+        if (session == null || !session.isAlive()) {
+            toast("截屏会话已失效，请重新授权");
+            capturing = false;
+            addBubble();
+            sVisible = true;
+            return;
+        }
         new Thread(() -> {
-            java.io.File f = null;
-            try {
-                f = ScreenCapture.captureOnce(getApplicationContext(), projection);
-            } catch (ScreenCapture.NoConsentException e) {
-                // consent vanished between check and use
-            } catch (Exception ignored) { }
-            final java.io.File out = f;
+            // PHASE 1 (fast): grab a frame while the bubble is still hidden.
+            Bitmap frame = session.grabFrame();
+            // The overlay may come back NOW: everything left is pure CPU work on
+            // an in-memory bitmap and nothing is captured any more.
+            main.post(() -> {
+                count = ShotStore.load(BubbleService.this).size();
+                addBubble();
+                sVisible = true;
+                capturing = false;
+            });
+            // PHASE 2 (slow): trim + encode + register, off the UI thread.
+            java.io.File out = session.encodeFile(getApplicationContext(), frame);
             main.post(() -> {
                 if (out != null) {
-                    ShotWatcherService.addCapturedFile(this, out);
-                    toast("已截取一张");
+                    ShotWatcherService.addCapturedFile(BubbleService.this, out);
+                    count = ShotStore.load(BubbleService.this).size();
+                    updateLabel();
                 } else {
                     toast("截取失败，请重试");
                 }
-                // 4: restore the bubble
-                count = ShotStore.load(this).size();
-                addBubble();
-                sVisible = true;
             });
         }, "bubble-capture").start();
     }

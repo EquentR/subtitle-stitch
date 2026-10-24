@@ -23,6 +23,8 @@ public final class ShotStore {
     private static final String KEY_SHOTS = "shots";
     private static final String KEY_RUNNING = "watcher_running";
     private static final String KEY_BUBBLE_HIDDEN = "bubble_hidden";
+    /** Master switch for the floating bubble (user-controlled in MainActivity). */
+    private static final String KEY_BUBBLE_ENABLED = "bubble_enabled";
     private static final int MAX = 30;
 
     private ShotStore() { }
@@ -102,5 +104,15 @@ public final class ShotStore {
 
     public static boolean isBubbleHidden(Context c) {
         return prefs(c).getBoolean(KEY_BUBBLE_HIDDEN, false);
+    }
+
+    public static void setBubbleEnabled(Context c, boolean enabled) {
+        prefs(c).edit().putBoolean(KEY_BUBBLE_ENABLED, enabled)
+                .putBoolean(KEY_BUBBLE_HIDDEN, !enabled).apply();
+    }
+
+    /** Default ON: the bubble is the primary capture entry point. */
+    public static boolean isBubbleEnabled(Context c) {
+        return prefs(c).getBoolean(KEY_BUBBLE_ENABLED, true);
     }
 }

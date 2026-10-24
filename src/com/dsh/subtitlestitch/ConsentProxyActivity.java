@@ -54,8 +54,11 @@ public class ConsentProxyActivity extends Activity {
             final Intent d = data;
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
                 try {
-                    ScreenCapture.MediaProjectionHolder.create(
-                            getApplicationContext(), rc, d);
+                    android.media.projection.MediaProjection p =
+                            ScreenCapture.MediaProjectionHolder.create(
+                                    getApplicationContext(), rc, d);
+                    ScreenCapture.closeSession();
+                    ScreenCapture.openSession(getApplicationContext(), p);
                     ShotWatcherService.onConsentGranted(getApplicationContext());
                     android.widget.Toast.makeText(getApplicationContext(),
                             "已授权自动截图", android.widget.Toast.LENGTH_SHORT).show();

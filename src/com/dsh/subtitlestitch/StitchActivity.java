@@ -61,6 +61,10 @@ public class StitchActivity extends Activity {
         Bitmap bitmap;           // may be downsampled for preview
         StitchEngine.CropWindow crop = new StitchEngine.CropWindow();
         ItemView view;
+        /** true when this Item owns its bitmap (the zoom editor's hi-res copy). */
+        boolean ownsBitmap = false;
+        /** Content box as fractions, shared by the grid preview and zoom editor. */
+        float[] contentBox = new float[]{0f, 0f, 1f, 1f};
         /** true for index>0 when the series uses linked cropping */
         boolean linked = false;
     }
@@ -103,6 +107,53 @@ public class StitchActivity extends Activity {
 
     // ------------------------------------------------------------------ UI
 
+    /** True when the active configuration is dark. */
+    private boolean isDark() {
+        int mode = getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        return mode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    /** Page background behind the image grid. */
+    private int cPage() {
+        return isDark() ? Color.parseColor("#111418") : Color.parseColor("#F0F2F5");
+    }
+
+    /** Card / cell background. */
+    private int cCard() {
+        return isDark() ? Color.parseColor("#1A1F26") : Color.WHITE;
+    }
+
+    /** Top bar background. */
+    private int cBar() {
+        return isDark() ? Color.parseColor("#1A1F26") : Color.parseColor("#FFFFFF");
+    }
+
+    /** Primary text. */
+    private int cText() {
+        return isDark() ? Color.WHITE : Color.parseColor("#1B1F24");
+    }
+
+    /** Secondary text. */
+    private int cSubtle() {
+        return isDark() ? Color.parseColor("#C7CFDB") : Color.parseColor("#6B7280");
+    }
+
+    /** Muted caption text (dimmer than cSubtle). */
+    private int cSubtle2() {
+        return isDark() ? Color.parseColor("#8A94A6") : Color.parseColor("#9AA3AF");
+    }
+
+    /** Plain button background. */
+    private int cBtn() {
+        return isDark() ? Color.parseColor("#2A3038") : Color.parseColor("#E8EEF9");
+    }
+
+    /** Plain button text. */
+    private int cBtnText() {
+        return isDark() ? Color.WHITE : Color.parseColor("#1F6FEB");
+    }
+
     private int dp(float v) {
         return (int) android.util.TypedValue.applyDimension(
                 android.util.TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
@@ -111,14 +162,14 @@ public class StitchActivity extends Activity {
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.parseColor("#111418"));
+        root.setBackgroundColor(cPage());
 
         // top bar
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(8), dp(8), dp(8), dp(8));
-        bar.setBackgroundColor(Color.parseColor("#1A1F26"));
+        bar.setBackgroundColor(cBar());
 
         Button back = small("返回");
         back.setOnClickListener(v -> finish());
@@ -126,7 +177,7 @@ public class StitchActivity extends Activity {
 
         TextView t = new TextView(this);
         t.setText("字幕拼接");
-        t.setTextColor(Color.WHITE);
+        t.setTextColor(cText());
         t.setTextSize(17);
         t.setPadding(dp(12), 0, 0, 0);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
@@ -168,7 +219,7 @@ public class StitchActivity extends Activity {
 
         emptyHint = new TextView(this);
         emptyHint.setText("还没有图片。点「添加」从相册选择，或先开启自动捕获截图。");
-        emptyHint.setTextColor(Color.parseColor("#8A94A6"));
+        emptyHint.setTextColor(cSubtle2());
         emptyHint.setTextSize(14);
         emptyHint.setGravity(Gravity.CENTER);
         emptyHint.setPadding(dp(24), dp(60), dp(24), dp(60));
@@ -197,8 +248,8 @@ public class StitchActivity extends Activity {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextSize(13);
-        b.setTextColor(Color.WHITE);
-        b.setBackgroundColor(Color.parseColor("#2A3038"));
+        b.setTextColor(cBtnText());
+        b.setBackgroundColor(cBtn());
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(38));
         lp.setMargins(dp(4), 0, dp(4), 0);
@@ -286,7 +337,31 @@ public class StitchActivity extends Activity {
                 Item it = new Item();
                 it.path = f.getAbsolutePath();
                 it.label = name;
-                it.bitmap = StitchEngine.decodeSampled(it.path, 900);
+                // Decode at a much higher resolution than the on-screen cell:
+                // the zoom editor scales the preview up to full screen, and a
+                // 900px cap made it visibly blurry there.
+                it.bitmap = StitchEngine.decodeSampled(it.path, 2048);
+                if (it.bitmap != null) {
+                    // Measure the content box ONCE and remember it. Both the grid
+                    // preview and the zoom editor then crop by the same fractions,
+                    // so the crop window never shifts between them.
+                    int[] box = StitchEngine.contentBox(it.bitmap);
+                    if (box[0] != 0 || box[1] != 0
+                            || box[2] != it.bitmap.getWidth()
+                            || box[3] != it.bitmap.getHeight()) {
+                        it.contentBox = new float[]{
+                                box[0] / (float) it.bitmap.getWidth(),
+                                box[1] / (float) it.bitmap.getHeight(),
+                                box[2] / (float) it.bitmap.getWidth(),
+                                box[3] / (float) it.bitmap.getHeight()};
+                        Bitmap croppedPreview =
+                                StitchEngine.cropToFractions(it.bitmap, it.contentBox);
+                        if (croppedPreview != it.bitmap) {
+                            it.bitmap.recycle();
+                            it.bitmap = croppedPreview;
+                        }
+                    }
+                }
                 if (it.bitmap == null) {
                     continue;
                 }
@@ -421,8 +496,10 @@ public class StitchActivity extends Activity {
         }
         Item target = items.get(idx);
         if (idx == 0) {
-            // the first image is the full frame by design
-            target.crop = StitchEngine.fullCrop();
+            // The first image keeps its OWN window (default: full frame), so the
+            // user can trim it like any other shot without disturbing the shared
+            // window used by the rest.
+            target.crop = source.crop.copy();
             if (target.view != null) {
                 target.view.cropView.invalidate();
             }
@@ -431,14 +508,11 @@ public class StitchActivity extends Activity {
         sharedCrop = source.crop.copy();
         target.crop = sharedCrop.copy();
         for (Item it : items) {
-            if (it == target) {
-                continue;
+            int i = items.indexOf(it);
+            if (it == target || i == 0) {
+                continue;              // first image is independent
             }
-            if (items.indexOf(it) == 0) {
-                it.crop = StitchEngine.fullCrop();
-            } else {
-                it.crop = sharedCrop.copy();
-            }
+            it.crop = sharedCrop.copy();
             if (it.view != null) {
                 it.view.cropView.invalidate();
             }
@@ -467,7 +541,11 @@ public class StitchActivity extends Activity {
             Item it = items.get(i);
             it.linked = i > 0;
             if (i == 0) {
-                it.crop = StitchEngine.fullCrop();
+                // keep whatever the user set for the first image (defaults to
+                // the full frame when the item is new)
+                if (it.crop == null) {
+                    it.crop = StitchEngine.fullCrop();
+                }
             } else {
                 it.crop = sharedCrop.copy();
             }
@@ -479,6 +557,7 @@ public class StitchActivity extends Activity {
 
     // -------------------------------------------------------------- export
 
+    /** Render a preview only -- saving is a separate, explicit action. */
     private void export() {
         if (items.isEmpty()) {
             toast("请先添加图片");
@@ -491,38 +570,62 @@ public class StitchActivity extends Activity {
             crops.add(it.crop.copy());
         }
         final ProgressDialog pd = new ProgressDialog(this);
-        pd.setMessage("正在拼接…");
+        pd.setMessage("正在生成预览…");
         pd.show();
         new Thread(() -> {
-            Bitmap out = StitchEngine.render(paths, crops, 1080, 0, Color.BLACK);
-            String saved = null;
-            if (out != null) {
-                String name = "stitch_" + System.currentTimeMillis() + ".jpg";
-                saved = MediaStoreUtil.saveBitmap(this, out, name);
-            }
+            // outMax = 0 keeps the NATIVE source width. Capping at 1080 used to
+            // downscale 1264x2780 phone screenshots and lose detail, which is why
+            // stitched output looked softer than the originals.
+            Bitmap out = StitchEngine.render(paths, crops, 0, 0, Color.BLACK);
             final Bitmap fin = out;
-            final String finSaved = saved;
             ui.post(() -> {
                 pd.dismiss();
                 if (fin == null) {
                     toast("拼接失败（内存不足或图片损坏）");
                     return;
                 }
-                showResult(fin, finSaved);
+                // Preview first; the user explicitly saves from the dialog.
+                showResult(fin);
             });
         }).start();
     }
 
-    private void showResult(Bitmap bmp, String savedUri) {
+    /** Persist the previewed bitmap to the gallery. */
+    private String savePreview(Bitmap bmp) {
+        if (bmp == null || bmp.isRecycled()) {
+            return null;
+        }
+        String name = "stitch_" + System.currentTimeMillis() + ".jpg";
+        return MediaStoreUtil.saveBitmap(this, bmp, name);
+    }
+
+    /**
+     * Preview dialog. Nothing is written to the gallery until the user taps
+     * 保存; the dialog also offers the two session controls the user asked for:
+     * clear the captured list, and stop the watcher.
+     */
+    private void showResult(Bitmap bmp) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(12), dp(12), dp(12));
-        box.setBackgroundColor(Color.parseColor("#1A1F26"));
+        box.setBackgroundColor(cCard());
 
-        // Show the stitched long image at its natural aspect ratio inside a
-        // scroll view, starting at the TOP. FIT_CENTER on a fixed-height view
-        // would shrink the whole strip into an unreadable thumbnail (and, when
-        // the parent is scrollable, jump to the bottom).
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(12), dp(10), dp(12), dp(6));
+        TextView t = new TextView(this);
+        t.setText("预览");
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(16);
+        head.addView(t, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView size = new TextView(this);
+        size.setText(StitchEngine.describe(bmp));
+        size.setTextColor(cSubtle2());
+        size.setTextSize(12);
+        head.addView(size);
+        box.addView(head);
+
         ImageView iv = new ImageView(this) {
             @Override
             protected void onMeasure(int wSpec, int hSpec) {
@@ -542,21 +645,64 @@ public class StitchActivity extends Activity {
         box.addView(sv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        TextView info = new TextView(this);
-        info.setText(savedUri != null
-                ? ("已保存到相册 · " + StitchEngine.describe(bmp))
-                : ("尺寸 " + StitchEngine.describe(bmp) + "（保存失败）"));
-        info.setTextColor(Color.parseColor("#8A94A6"));
-        info.setTextSize(12);
-        info.setPadding(0, dp(6), 0, 0);
-        box.addView(info);
-
-        Button close = small("关闭");
-        close.setOnClickListener(v -> finish());
-        box.addView(close);
-
         android.app.Dialog d = new android.app.Dialog(this,
                 android.R.style.Theme_DeviceDefault_Dialog_NoActionBar);
+
+        TextView status = new TextView(this);
+        status.setTextColor(cSubtle2());
+        status.setTextSize(12);
+        status.setPadding(dp(12), dp(4), dp(12), dp(4));
+        box.addView(status);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(dp(8), dp(4), dp(8), dp(10));
+
+        Button save = small("保存");
+        save.setOnClickListener(v -> {
+            String saved = savePreview(bmp);
+            if (saved != null) {
+                status.setText("已保存到相册 · Pictures/SubtitleStitch");
+                save.setEnabled(false);
+            } else {
+                status.setText("保存失败");
+            }
+        });
+        actions.addView(save);
+
+        Button close = small("关闭");
+        close.setOnClickListener(v -> {
+            d.dismiss();
+            finish();
+        });
+        actions.addView(close);
+        box.addView(actions);
+
+        // ---- session controls
+        LinearLayout session = new LinearLayout(this);
+        session.setOrientation(LinearLayout.HORIZONTAL);
+        session.setPadding(dp(8), 0, dp(8), dp(10));
+
+        Button clear = small("清空已截取");
+        clear.setOnClickListener(v -> {
+            ShotWatcherService.clearCaptured();
+            ShotStore.clear(this);
+            BubbleService.hideBadge(this);
+            ShotWatcherService.notifyCleared(this);
+            status.setText("已清空捕获列表");
+            toast("已清空");
+        });
+        session.addView(clear);
+
+        Button stop = small("关闭监听");
+        stop.setOnClickListener(v -> {
+            ShotWatcherService.stop(this);
+            status.setText("已关闭监听");
+            toast("已关闭监听");
+        });
+        session.addView(stop);
+        box.addView(session);
+
         d.setContentView(box);
         d.setOnDismissListener(x -> {
             if (bmp != null && !bmp.isRecycled()) {
@@ -565,10 +711,9 @@ public class StitchActivity extends Activity {
         });
         if (d.getWindow() != null) {
             d.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
-                    (int) (getResources().getDisplayMetrics().heightPixels * 0.88));
+                    (int) (getResources().getDisplayMetrics().heightPixels * 0.9));
         }
         d.show();
-        // start at the top of the long image
         sv.post(() -> sv.scrollTo(0, 0));
     }
 
@@ -588,7 +733,7 @@ public class StitchActivity extends Activity {
     private void openZoomEditor(final Item item) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackgroundColor(Color.parseColor("#0E1116"));
+        box.setBackgroundColor(cPage());
 
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
@@ -608,7 +753,20 @@ public class StitchActivity extends Activity {
 
         // A dedicated crop view bound to a scratch Item whose crop we copy back.
         final Item scratch = new Item();
-        scratch.bitmap = item.bitmap;
+        // Load a HIGH-RES copy for the zoom editor, but run it through the SAME
+        // black-bar trimming the grid preview uses. Without the trim the zoom
+        // view shows the bars and its crop fractions are relative to the
+        // untrimmed height, so the window jumped upward once back in the grid.
+        Bitmap hiRes = StitchEngine.decodeSampled(item.path, 4096);
+        if (hiRes != null) {
+            Bitmap cropped = StitchEngine.cropToFractions(hiRes, item.contentBox);
+            if (cropped != hiRes) {
+                hiRes.recycle();
+                hiRes = cropped;
+            }
+        }
+        scratch.bitmap = hiRes != null ? hiRes : item.bitmap;
+        scratch.ownsBitmap = hiRes != null;
         scratch.path = item.path;
         scratch.crop = item.crop.copy();
         final CropView zoom = new CropView(scratch);
@@ -622,7 +780,7 @@ public class StitchActivity extends Activity {
 
         TextView hint = new TextView(this);
         hint.setText("拖动上下两个圆点调整保留区域 · 中间可整体平移");
-        hint.setTextColor(Color.parseColor("#8A94A6"));
+        hint.setTextColor(cSubtle2());
         hint.setTextSize(12);
         hint.setPadding(dp(12), dp(6), dp(12), dp(10));
         box.addView(hint);
@@ -636,6 +794,10 @@ public class StitchActivity extends Activity {
         d.setOnDismissListener(x -> {
             applyCrop(item);
             rebuildList();
+            if (scratch.ownsBitmap && scratch.bitmap != null
+                    && !scratch.bitmap.isRecycled()) {
+                scratch.bitmap.recycle();
+            }
         });
         if (d.getWindow() != null) {
             d.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -663,7 +825,7 @@ public class StitchActivity extends Activity {
             super(StitchActivity.this);
             this.item = it;
             setOrientation(VERTICAL);
-            setBackgroundColor(Color.parseColor("#1A1F26"));
+            setBackgroundColor(cCard());
             setPadding(dp(5), dp(5), dp(5), dp(5));
             // tapping the cell body (not a handle) opens the zoomed editor
             setOnClickListener(v -> openZoomEditorItem(item));
@@ -672,7 +834,7 @@ public class StitchActivity extends Activity {
             head.setOrientation(HORIZONTAL);
             head.setGravity(Gravity.CENTER_VERTICAL);
             title = new TextView(StitchActivity.this);
-            title.setTextColor(Color.parseColor("#C7CFDB"));
+            title.setTextColor(cSubtle());
             title.setTextSize(11);
             title.setSingleLine(true);
             title.setPadding(0, 0, dp(2), 0);
@@ -693,7 +855,7 @@ public class StitchActivity extends Activity {
         void bind(int index, int total) {
             title.setText((index + 1) + " " + item.label);
             title.setTextColor(index == 0
-                    ? Color.parseColor("#FFD666") : Color.parseColor("#C7CFDB"));
+                    ? Color.parseColor("#E8A317") : cSubtle());
             boolean first = index == 0;
             // the first image keeps the full frame; hide its remove button only
             // when it would leave nothing behind, keep reorder controls minimal
@@ -705,8 +867,8 @@ public class StitchActivity extends Activity {
             b.setText(text);
             b.setAllCaps(false);
             b.setTextSize(10);
-            b.setTextColor(Color.WHITE);
-            b.setBackgroundColor(Color.parseColor("#2A3038"));
+            b.setTextColor(cBtnText());
+            b.setBackgroundColor(cBtn());
             b.setPadding(0, 0, 0, 0);
             b.setMinWidth(0);
             b.setMinimumWidth(0);
@@ -765,20 +927,18 @@ public class StitchActivity extends Activity {
                 return;
             }
             float vw = getWidth(), vh = getHeight();
-            float iw = item.bitmap.getWidth(), ih = item.bitmap.getHeight();
-            // A phone screenshot is very tall. FIT_CENTER inside a wide grid cell
-            // wastes most of the cell as empty margin. Instead we fill the cell
-            // horizontally (cover the width) and let the image extend vertically,
-            // anchoring at the TOP so the handles/labels near the top stay
-            // reachable; the band itself is always drawn.
-            float scale = vw / iw;
-            if (ih * scale < vh * 0.6f) {
-                // very wide source: fall back to containment so it is readable
-                scale = Math.min(vw / iw, vh / ih);
+            if (vw <= 0 || vh <= 0) {
+                dst.setEmpty();
+                return;
             }
+            float iw = item.bitmap.getWidth(), ih = item.bitmap.getHeight();
+            // FIT the whole image inside the view. Filling the width used to push
+            // a tall phone screenshot far past the cell, so its lower half (and
+            // the bottom crop handle) was clipped by the viewport.
+            float scale = Math.min(vw / iw, vh / ih);
             float w = iw * scale, h = ih * scale;
             float l = (vw - w) / 2f;
-            float t = 0f;                       // anchor to top
+            float t = (vh - h) / 2f;
             dst.set(l, t, l + w, t + h);
         }
 
@@ -819,19 +979,19 @@ public class StitchActivity extends Activity {
             }
             float y0 = dst.top + item.crop.top * dst.height();
             float y1 = dst.top + item.crop.bottom * dst.height();
-            // Generous grab radius: the handles are small circles, but a user
-            // aiming at them should not have to be pixel-perfect.
-            float touch = dp(40);
+            // Grab radius. A large radius made the two handles overlap, so
+            // reaching for the bottom handle sometimes grabbed the top one.
+            // Keep it tight and, when both are in range, pick the NEAREST.
+            float touch = dp(22);
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    if (isFirstItem() && !isZoom()) {
-                        // first image always keeps the full frame; a tap on it
-                        // opens the zoomed preview anyway
-                        return false;
-                    }
-                    if (Math.abs(e.getY() - y0) <= touch) {
+                    float dTop = Math.abs(e.getY() - y0);
+                    float dBottom = Math.abs(e.getY() - y1);
+                    if (dTop <= touch && dBottom <= touch) {
+                        dragging = (dTop <= dBottom) ? 1 : 2;
+                    } else if (dTop <= touch) {
                         dragging = 1;
-                    } else if (Math.abs(e.getY() - y1) <= touch) {
+                    } else if (dBottom <= touch) {
                         dragging = 2;
                     } else if (isZoom() && e.getY() > y0 && e.getY() < y1) {
                         // in the zoomed editor, grabbing the middle pans the

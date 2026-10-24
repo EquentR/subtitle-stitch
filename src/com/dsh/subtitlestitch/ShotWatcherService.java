@@ -344,11 +344,12 @@ public class ShotWatcherService extends Service {
             if (added) {
                 persist();
                 updateNotification();
-                // Per the user's chosen behaviour: never pop the bubble right
-                // after a capture (it would end up in the next screenshot too).
-                // The notification is the signal; the bubble stays hidden for a
-                // few seconds.
-                BubbleService.onNewScreenshot(this);
+                // Keep the bubble visible: it is the primary entry point and the
+                // user does not want to re-enable it from the notification after
+                // every shot. Our own captures never contain it (it is hidden
+                // only while grabbing a frame); for system screenshots the user
+                // can long-press to hide it.
+                BubbleService.refreshBadge(this);
             }        } finally {
             scanning = false;
         }
@@ -441,11 +442,17 @@ public class ShotWatcherService extends Service {
         sCaptured.add(MediaStoreUtil.Shot.ofFile(f));
         ShotStore.save(ctx, sCaptured);
         MediaStoreUtil.trimCache(ctx, 40);
-        Intent i = new Intent(ctx, ShotWatcherService.class);
-        i.setAction(ACTION_CLEAR + ".refresh");
-        try {
-            ctx.startService(i);
-        } catch (Exception ignored) { }
+        // Refresh the notification WITHOUT re-entering onStartCommand in a way
+        // that re-promotes foreground types: restarting the service here used to
+        // reset the mediaProjection type and kill the live capture session, which
+        // looked like "must re-authorize after every screenshot".
+        if (isRunning) {
+            Intent i = new Intent(ctx, ShotWatcherService.class);
+            i.setAction(ACTION_CLEAR + ".refresh");
+            try {
+                ctx.startService(i);
+            } catch (Exception ignored) { }
+        }
     }
 
     /** Rebuild the ongoing notification (e.g. after the bubble was hidden). */
