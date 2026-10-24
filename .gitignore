@@ -1,0 +1,23 @@
+# Build output
+build/
+*.apk
+*.aab
+*.dex
+*.class
+
+# Local machine configuration (SDK / JDK paths, signing material).
+# NEVER commit this: it may contain keystore passwords.
+local.properties
+
+# Signing material -- must stay out of the repository
+*.keystore
+*.jks
+*.p12
+*.pem
+!res/**/*.pem
+
+# IDE / OS noise
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
