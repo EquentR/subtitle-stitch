@@ -176,8 +176,10 @@ javac -source 17 -target 17 -encoding UTF-8 -nowarn \
     -classpath "$ANDROID_JAR" \
     -d "$OUT/classes" \
     @"$OUT/sources.txt" 2>&1 | grep -v 'uses unchecked or unsafe' || true
-[ -f "$OUT/classes/$PACKAGE/MainActivity.class" ] || {
-    echo "compilation produced no classes" >&2; exit 1; }
+PACKAGE_PATH="${PACKAGE//.//}"
+[ -f "$OUT/classes/$PACKAGE_PATH/MainActivity.class" ] || {
+    echo "compilation produced no classes (expected $OUT/classes/$PACKAGE_PATH/MainActivity.class)" >&2
+    exit 1; }
 echo "    compiled $src_count source files"
 
 # ------------------------------------------------------------------- dex
