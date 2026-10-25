@@ -82,7 +82,22 @@ KS_ALIAS="${STITCH_KS_ALIAS:-$(prop keystore.alias || echo debug)}"
 [ -n "$OUT" ] || OUT="${STITCH_OUT_DIR:-$ROOT/build}"
 
 BUILD_TOOLS="$SDK/build-tools/$BUILD_TOOLS_VERSION"
+# Fall back to any installed build-tools that can actually run, so the script is
+# not pinned to one exact version (CI images and local SDKs differ).
+if [ ! -x "$BUILD_TOOLS/aapt2" ] && [ ! -f "$BUILD_TOOLS/aapt2.exe" ]; then
+    for candidate in "$SDK"/build-tools/*/; do
+        if [ -x "${candidate}aapt2" ] || [ -f "${candidate}aapt2.exe" ]; then
+            BUILD_TOOLS="${candidate%/}"
+        fi
+    done
+fi
 ANDROID_JAR="$SDK/platforms/$PLATFORM/android.jar"
+# Same for the platform: accept the highest android-NN if 36 is unavailable.
+if [ ! -f "$ANDROID_JAR" ]; then
+    for candidate in "$SDK"/platforms/android-*/android.jar; do
+        [ -f "$candidate" ] && ANDROID_JAR="$candidate"
+    done
+fi
 
 if [ -n "$JAVA_HOME" ] && [ -d "$JAVA_HOME/bin" ]; then
     export PATH="$JAVA_HOME/bin:$PATH"

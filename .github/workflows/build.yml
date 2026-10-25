@@ -44,12 +44,11 @@ jobs:
           fi
           echo "sdkmanager: $SDKM"
           yes | "$SDKM" --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 || true
+          # The SDK directory is owned by root on the runner image, so installing
+          # may fail; build.sh falls back to whatever is already present.
           "$SDKM" --sdk_root="$ANDROID_SDK_ROOT" \
-            "platforms;android-36" "build-tools;36.0.0" "platform-tools"
-          # the build-tools zip does not always carry the executable bit
-          find "$ANDROID_SDK_ROOT/build-tools" -maxdepth 2 -type f \
-            \( -name aapt2 -o -name zipalign -o -name apksigner -o -name d8 \) \
-            -exec chmod +x {} +
+            "platforms;android-36" "build-tools;36.0.0" || true
+          ls "$ANDROID_SDK_ROOT/build-tools" "$ANDROID_SDK_ROOT/platforms"
 
       - name: Run unit tests
         run: |
@@ -63,12 +62,12 @@ jobs:
 
       - name: Verify signature
         run: |
-          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | head -1)"
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort | tail -1)"
           "$APKSIGNER" verify --print-certs "$RUNNER_TEMP/build/SubtitleStitch.apk"
 
       - name: Show APK info
         run: |
-          AAPT2="$(find "$ANDROID_SDK_ROOT/build-tools" -name aapt2 -type f | head -1)"
+          AAPT2="$(find "$ANDROID_SDK_ROOT/build-tools" -name aapt2 -type f | sort | tail -1)"
           "$AAPT2" dump badging "$RUNNER_TEMP/build/SubtitleStitch.apk" | head -5
           ls -lh "$RUNNER_TEMP/build/SubtitleStitch.apk"
 
