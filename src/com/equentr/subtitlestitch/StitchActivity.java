@@ -653,9 +653,7 @@ public class StitchActivity extends Activity {
      * clear the captured list, and stop the watcher.
      */
     private void showResult(Bitmap bmp) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackgroundColor(cCard());
+        PreviewLayout box = new PreviewLayout(bmp);
 
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
@@ -675,23 +673,7 @@ public class StitchActivity extends Activity {
         head.addView(size);
         box.addView(head);
 
-        ImageView iv = new ImageView(this) {
-            @Override
-            protected void onMeasure(int wSpec, int hSpec) {
-                int w = MeasureSpec.getSize(wSpec);
-                int needed = bmp.getHeight() == 0 ? w
-                        : (int) ((long) w * bmp.getHeight() / bmp.getWidth());
-                setMeasuredDimension(w, Math.max(needed, 1));
-            }
-        };
-        iv.setScaleType(ImageView.ScaleType.FIT_XY);
-        iv.setAdjustViewBounds(false);
-        iv.setImageBitmap(bmp);
-
-        ScrollView sv = new ScrollView(this);
-        sv.addView(iv, new android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        box.addView(sv, new LinearLayout.LayoutParams(
+        box.addView(box.image, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         android.app.Dialog d = new android.app.Dialog(this,
@@ -761,12 +743,77 @@ public class StitchActivity extends Activity {
                 bmp.recycle();
             }
         });
-        if (d.getWindow() != null) {
-            d.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
-                    (int) (getResources().getDisplayMetrics().heightPixels * 0.9));
-        }
         d.show();
-        sv.post(() -> sv.scrollTo(0, 0));
+        if (d.getWindow() != null) {
+            d.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+            d.getWindow().setLayout(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    /** Measures the controls first, then fits the whole bitmap in the remaining space. */
+    private final class PreviewLayout extends LinearLayout {
+        final ImageView image;
+        private final int bitmapWidth;
+        private final int bitmapHeight;
+        private final Rect visibleBounds = new Rect();
+
+        PreviewLayout(Bitmap bitmap) {
+            super(StitchActivity.this);
+            bitmapWidth = bitmap.getWidth();
+            bitmapHeight = bitmap.getHeight();
+            setOrientation(VERTICAL);
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(cCard());
+            background.setCornerRadius(dp(24));
+            setBackground(background);
+            setClipToOutline(true);
+            image = new ImageView(StitchActivity.this);
+            image.setImageBitmap(bitmap);
+            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            image.setContentDescription("完整拼接预览");
+        }
+
+        private int controlsHeight(int width) {
+            int height = 0;
+            int widthSpec = MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY);
+            int heightSpec = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+            for (int i = 0; i < getChildCount(); i++) {
+                View child = getChildAt(i);
+                if (child != image && child.getVisibility() != GONE) {
+                    child.measure(widthSpec, heightSpec);
+                    height += child.getMeasuredHeight();
+                }
+            }
+            return height;
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            // Use the activity's current visible bounds: this also follows rotation
+            // and split-screen resizing without relying on physical screen size.
+            getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleBounds);
+            int maxWidth = Math.max(1, visibleBounds.width() - dp(24));
+            int maxHeight = Math.max(1, visibleBounds.height() - dp(24));
+            if (MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED) {
+                maxWidth = Math.min(maxWidth, MeasureSpec.getSize(widthSpec));
+            }
+            if (MeasureSpec.getMode(heightSpec) != MeasureSpec.UNSPECIFIED) {
+                maxHeight = Math.min(maxHeight, MeasureSpec.getSize(heightSpec));
+            }
+            maxWidth = Math.min(maxWidth, dp(720));
+            int chrome = controlsHeight(maxWidth);
+            float scale = Math.min(maxWidth / (float) bitmapWidth,
+                    Math.max(1, maxHeight - chrome) / (float) bitmapHeight);
+            // Keep the two action columns readable even for extremely tall images.
+            int width = Math.min(maxWidth, Math.max(dp(300), Math.round(bitmapWidth * scale)));
+            chrome = controlsHeight(width);
+            int imageHeight = Math.max(1, Math.min(maxHeight - chrome,
+                    Math.round(width * (bitmapHeight / (float) bitmapWidth))));
+            int height = Math.min(maxHeight, chrome + imageHeight);
+            super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
+        }
     }
 
     private void toast(String s) {
