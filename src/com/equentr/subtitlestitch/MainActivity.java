@@ -88,7 +88,7 @@ public class MainActivity extends Activity {
                 return;
             }
             awaitingProjection = true;
-            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_PROJECTION);
+            startActivityForResult(ScreenCapture.createConsentIntent(this), REQ_PROJECTION);
             refreshState();
         } catch (Exception e) {
             awaitingProjection = false;

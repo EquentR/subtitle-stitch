@@ -467,7 +467,7 @@ public class BubbleService extends Service {
                 sVisible = true;
                 capturing = false;
             });
-            // PHASE 2 (slow): trim + encode + register, off the UI thread.
+            // PHASE 2 (slow): encode + register, off the UI thread.
             java.io.File out = session.encodeFile(getApplicationContext(), frame);
             main.post(() -> {
                 if (out != null) {

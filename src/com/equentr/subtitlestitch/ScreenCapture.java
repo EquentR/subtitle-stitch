@@ -4,331 +4,387 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
+import android.graphics.Point;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.util.DisplayMetrics;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.Display;
 import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 
-/**
- * Screenshot capture through MediaProjection.
- *
- * THE key constraint (Android 14+):
- *   "Don't take multiple captures by invoking MediaProjection#createVirtualDisplay
- *    multiple times on the same instance."
- * A projection instance may own exactly ONE VirtualDisplay for its whole life.
- * Creating a fresh display per screenshot throws SecurityException AND revokes
- * the projection -- which looked like "have to re-authorise after every shot".
- *
- * So we keep ONE long-lived VirtualDisplay + ImageReader for the session and
- * simply grab the newest frame each time the user asks for a shot. The session
- * is torn down only when the projection is revoked.
- *
- * MediaProjection is NOT a runtime permission: the user approves once via the
- * system dialog. No root required.
- */
+/** Full-screen capture through one VirtualDisplay for each projection consent. */
 public final class ScreenCapture {
-
     private static final String TAG = "SubtitleStitch";
 
     private ScreenCapture() { }
 
-    /** Thrown when there is no usable consent token for this session. */
     public static final class NoConsentException extends Exception {
         public NoConsentException() { super("media projection consent required"); }
     }
 
+    /** Screenshots need the entire display, rather than a selected app window. */
+    public static Intent createConsentIntent(Context context) {
+        MediaProjectionManager manager = MediaProjectionHolder.manager(context);
+        if (manager == null) {
+            throw new IllegalStateException("MediaProjectionManager unavailable");
+        }
+        if (Build.VERSION.SDK_INT >= 34) {
+            return manager.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay());
+        }
+        return manager.createScreenCaptureIntent();
+    }
+
     /**
-     * A session owns the single VirtualDisplay for one MediaProjection.
-     * Frames are read from the ImageReader on demand.
+     * Owns a single VirtualDisplay; resizing replaces only its receiving surface.
+     * Reader lifetime and frame copying share a lock, so a resize cannot close a
+     * reader while another thread is copying its image. Encoding never holds it.
      */
     public static final class Session {
+        private final Context context;
         private final MediaProjection projection;
-        private final ImageReader reader;
         private final VirtualDisplay display;
         private final HandlerThread thread;
-        private final int width;
-        private final int height;
+        private final Handler handler;
+        private final DisplayManager displayManager;
+        private final Object frameLock = new Object();
+        private final int density;
+        private ImageReader reader;
+        private int width;
+        private int height;
+        private int requestedWidth;
+        private int requestedHeight;
+        private int requestedRotation;
+        private int observedRotation;
+        private long geometryReadyAt;
+        private long requestedGeneration;
+        private long appliedGeneration;
+        private boolean contentSizeKnown;
+        private boolean resizeQueued;
         private volatile boolean closed;
 
-        private Session(MediaProjection p, ImageReader r, VirtualDisplay d,
-                        HandlerThread t, int w, int h) {
-            this.projection = p;
-            this.reader = r;
-            this.display = d;
-            this.thread = t;
-            this.width = w;
-            this.height = h;
+        private final DisplayManager.DisplayListener displayListener =
+                new DisplayManager.DisplayListener() {
+                    @Override public void onDisplayAdded(int id) { }
+                    @Override public void onDisplayRemoved(int id) { }
+                    @Override public void onDisplayChanged(int id) {
+                        if (id == Display.DEFAULT_DISPLAY) {
+                            synchronizeDisplaySize();
+                        }
+                    }
+                };
+
+        private Session(Context context, MediaProjection projection, ImageReader reader,
+                        VirtualDisplay display, HandlerThread thread, int width,
+                        int height, int density) {
+            this.context = context.getApplicationContext();
+            this.projection = projection;
+            this.reader = reader;
+            this.display = display;
+            this.thread = thread;
+            this.handler = new Handler(thread.getLooper());
+            this.displayManager = (DisplayManager) this.context.getSystemService(
+                    Context.DISPLAY_SERVICE);
+            this.width = this.requestedWidth = width;
+            this.height = this.requestedHeight = height;
+            this.density = density;
+            this.requestedRotation = this.observedRotation = currentRotation();
+            this.geometryReadyAt = SystemClock.uptimeMillis();
         }
 
-        public int width() { return width; }
+        public int width() { synchronized (frameLock) { return width; } }
+        public int height() { synchronized (frameLock) { return height; } }
+        public boolean isAlive() { return !closed; }
 
-        public int height() { return height; }
-
-        public boolean isAlive() {
-            return !closed;
+        private int currentRotation() {
+            Display source = displayManager == null ? null
+                    : displayManager.getDisplay(Display.DEFAULT_DISPLAY);
+            return source == null ? 0 : source.getRotation();
         }
 
-        /**
-         * Grab the most recent frame and save it as a PNG.
-         * Safe to call repeatedly: the display is never recreated.
-         */
-        /**
-         * FAST path: take the newest frame into a Bitmap.
-         *
-         * The caller must keep any overlay hidden only until this returns; all
-         * slow work (trim + encode) is deferred to {@link #encodeFile(Context,
-         * Bitmap)} so the bubble can reappear almost immediately.
-         */
+        private void startMonitoring() {
+            if (displayManager != null) {
+                displayManager.registerDisplayListener(displayListener, handler);
+            }
+            synchronizeDisplaySize();
+        }
+
+        private static final long FRAME_DEADLINE_MS = 2200;
+        // A geometry change begins system compositor animation; ordinary captures
+        // keep the creation-time deadline and do not pay this transition wait.
+        private static final long ROTATION_SETTLE_BASE_MS = 200;
+        private static final long ROTATION_SETTLE_SCALE_MS = 300;
+        private boolean isSettled() {
+            return SystemClock.uptimeMillis() >= geometryReadyAt;
+        }
+
+        private long rotationSettleDelayMs() {
+            float scale = 1f;
+            try {
+                float transition = Settings.Global.getFloat(context.getContentResolver(),
+                        Settings.Global.TRANSITION_ANIMATION_SCALE, 1f);
+                float window = Settings.Global.getFloat(context.getContentResolver(),
+                        Settings.Global.WINDOW_ANIMATION_SCALE, 1f);
+                scale = Math.max(transition, window);
+            } catch (RuntimeException ignored) { }
+            scale = Math.max(0f, Math.min(5f, scale));
+            return ROTATION_SETTLE_BASE_MS + (long) (ROTATION_SETTLE_SCALE_MS * scale);
+        }
+
+        private void synchronizeDisplaySize() {
+            synchronized (frameLock) {
+                // On Android 14+, captured-content callbacks are authoritative.
+                // Do not fight those dimensions with a stale display/configuration.
+                if (closed || (Build.VERSION.SDK_INT >= 34 && contentSizeKnown)) {
+                    return;
+                }
+            }
+            int[] size = currentScreenSize(context);
+            requestSize(size[0], size[1], false);
+        }
+
+        private void requestSize(int newWidth, int newHeight, boolean fromContent) {
+            if (newWidth <= 0 || newHeight <= 0) {
+                return;
+            }
+            synchronized (frameLock) {
+                if (closed) {
+                    return;
+                }
+                if (fromContent) {
+                    contentSizeKnown = true;
+                } else if (Build.VERSION.SDK_INT >= 34 && contentSizeKnown) {
+                    return;
+                }
+                int rotation = currentRotation();
+                boolean directionChanged = rotation != observedRotation;
+                boolean sizeChanged = newWidth != requestedWidth || newHeight != requestedHeight;
+                observedRotation = rotation;
+                if (!sizeChanged && !directionChanged) {
+                    return;
+                }
+                requestedWidth = newWidth;
+                requestedHeight = newHeight;
+                requestedRotation = rotation;
+                requestedGeneration++;
+                geometryReadyAt = SystemClock.uptimeMillis() + rotationSettleDelayMs();
+                if (!resizeQueued) {
+                    resizeQueued = true;
+                    handler.post(this::applyResize);
+                }
+            }
+        }
+
+        private void applyResize() {
+            synchronized (frameLock) {
+                resizeQueued = false;
+                if (closed || appliedGeneration == requestedGeneration) {
+                    return;
+                }
+                ImageReader replacement = null;
+                try {
+                    if (width != requestedWidth || height != requestedHeight) {
+                        replacement = ImageReader.newInstance(requestedWidth, requestedHeight,
+                                PixelFormat.RGBA_8888, 2);
+                        // Android 14 permits resizing this display, but not creating
+                        // a second VirtualDisplay with the same projection token.
+                        display.setSurface(null);
+                        display.resize(requestedWidth, requestedHeight, density);
+                        display.setSurface(replacement.getSurface());
+                        ImageReader previous = reader;
+                        reader = replacement;
+                        replacement = null;
+                        width = requestedWidth;
+                        height = requestedHeight;
+                        previous.close();
+                    }
+                    appliedGeneration = requestedGeneration;
+                    Log.i(TAG, "capture surface resized " + width + "x" + height
+                            + " generation=" + appliedGeneration);
+                } catch (RuntimeException error) {
+                    if (replacement != null) {
+                        replacement.close();
+                    }
+                    Log.w(TAG, "cannot resize capture surface", error);
+                    shutdown();
+                }
+            }
+        }
+
+        private boolean geometryIsCurrent() {
+            // A 90-degree rotation can be visible to Display before the projection
+            // callback arrives. Wait rather than save a frame on the old surface.
+            return !closed && requestedGeneration == appliedGeneration
+                    && requestedRotation % 2 == currentRotation() % 2;
+        }
+
+        /** Copy a fresh full frame; the bubble only needs hiding until this returns. */
         public Bitmap grabFrame() {
             if (closed) {
                 return null;
             }
-            Image img = null;
-            final long t0 = android.os.SystemClock.elapsedRealtime();
+            synchronizeDisplaySize();
+            long start = SystemClock.elapsedRealtime();
+            long drainedGeneration = -1;
             try {
-                Image first = reader.acquireLatestImage();
-                if (first != null) {
-                    first.close();          // discard whatever was already queued
-                }
-                long deadline = System.currentTimeMillis() + 800;
-                while (img == null && System.currentTimeMillis() < deadline) {
-                    try { Thread.sleep(8); } catch (InterruptedException ignored) { }
-                    img = reader.acquireLatestImage();
-                }
-                long tAcquire = android.os.SystemClock.elapsedRealtime();
-                if (img == null) {
-                    Log.w(TAG, "grabFrame: no frame after " + (tAcquire - t0) + "ms");
-                    return null;
-                }
-                Bitmap bmp = toBitmap(img);
-                Log.i(TAG, "FRAME TIMING acquire=" + (tAcquire - t0)
-                        + "ms bitmap=" + (android.os.SystemClock.elapsedRealtime() - tAcquire)
-                        + "ms");
-                return bmp;
-            } catch (Exception e) {
-                Log.w(TAG, "grabFrame failed", e);
-                return null;
-            } finally {
-                if (img != null) {
-                    try { img.close(); } catch (Exception ignored) { }
-                }
-            }
-        }
-
-        /**
-         * SLOW path: trim black bars and write the file. Safe to run after the
-         * overlay has been shown again.
-         */
-        public File encodeFile(Context ctx, Bitmap bmp) {
-            if (bmp == null) {
-                return null;
-            }
-            long t0 = android.os.SystemClock.elapsedRealtime();
-            try {
-                Bitmap trimmed = StitchEngine.trimBlackBorders(bmp);
-                long tTrim = android.os.SystemClock.elapsedRealtime();
-                try {
-                    File out = savePng(ctx, trimmed);
-                    Log.i(TAG, "ENCODE TIMING trim=" + (tTrim - t0)
-                            + "ms save=" + (android.os.SystemClock.elapsedRealtime() - tTrim)
-                            + "ms");
-                    return out;
-                } finally {
-                    if (trimmed != bmp) {
-                        trimmed.recycle();
-                    }
-                }
-            } finally {
-                bmp.recycle();
-            }
-        }
-
-        public File grab(Context ctx) {
-            if (closed) {
-                return null;
-            }
-            Image img = null;
-            final long t0 = android.os.SystemClock.elapsedRealtime();
-            try {
-                // Drain buffered frames first: the reader may still hold frames
-                // captured BEFORE the caller hid the floating bubble, and using
-                // one of those baked the bubble (or a black box in its place)
-                // into the screenshot.
-                // acquireLatestImage() already discards older queued frames and
-                // returns the newest one, so a separate drain loop only added
-                // latency. We simply poll until a frame produced AFTER the caller
-                // hid the overlay shows up.
-                long deadline = System.currentTimeMillis() + 800;
-                Image first = reader.acquireLatestImage();
-                if (first != null) {
-                    first.close();          // discard whatever was already queued
-                }
-                while (img == null && System.currentTimeMillis() < deadline) {
-                    try { Thread.sleep(16); } catch (InterruptedException ignored) { }
-                    img = reader.acquireLatestImage();
-                }
-                long tAcquire = android.os.SystemClock.elapsedRealtime();
-                if (img == null) {
-                    Log.w(TAG, "grab: no frame available after "
-                            + (tAcquire - t0) + "ms");
-                    return null;
-                }
-                Bitmap bmp = toBitmap(img);
-                long tBitmap = android.os.SystemClock.elapsedRealtime();
-                try {
-                    // The mirrored content may be letterboxed inside the virtual
-                    // display (e.g. a landscape app on a portrait-sized surface).
-                    // Crop the uniform black bars so the stitched result has no
-                    // giant empty margins.
-                    Bitmap trimmed = StitchEngine.trimBlackBorders(bmp);
-                    long tTrim = android.os.SystemClock.elapsedRealtime();
-                    if (trimmed != bmp) {
-                        try {
-                            File outFile = savePng(ctx, trimmed);
-                            long tSave2 = android.os.SystemClock.elapsedRealtime();
-                            Log.i(TAG, "CAPTURE TIMING acquire=" + (tAcquire - t0)
-                                    + "ms bitmap=" + (tBitmap - tAcquire)
-                                    + "ms trim=" + (tTrim - tBitmap)
-                                    + "ms save=" + (tSave2 - tTrim)
-                                    + "ms total=" + (tSave2 - t0) + "ms");
-                            return outFile;
-                        } finally {
-                            trimmed.recycle();
+            while (!closed && SystemClock.elapsedRealtime() - start < FRAME_DEADLINE_MS) {
+                    synchronized (frameLock) {
+                        if (requestedGeneration == appliedGeneration && !closed) {
+                            Image image = reader.acquireLatestImage();
+                            if (drainedGeneration != appliedGeneration) {
+                                // Drop anything queued before the overlay was hidden,
+                                // and repeat this drain if the receiving surface changes.
+                                if (image != null) image.close();
+                                drainedGeneration = appliedGeneration;
+                            } else if (image != null) {
+                                try {
+                                    if (geometryIsCurrent() && isSettled()
+                                            && image.getWidth() == width
+                                            && image.getHeight() == height) {
+                                        Bitmap bitmap = toBitmap(image);
+                                        if (geometryIsCurrent() && isSettled()) {
+                                            Log.i(TAG, "captured full frame " + width + "x" + height
+                                                    + " generation=" + appliedGeneration
+                                                    + " elapsed=" + (SystemClock.elapsedRealtime() - start)
+                                                    + "ms");
+                                            return bitmap;
+                                        }
+                                        bitmap.recycle();
+                                    }
+                                } finally {
+                                    image.close();
+                                }
+                            }
                         }
                     }
-                    File outFile = savePng(ctx, bmp);
-                    long tSave = android.os.SystemClock.elapsedRealtime();
-                    Log.i(TAG, "CAPTURE TIMING acquire=" + (tAcquire - t0)
-                            + "ms bitmap=" + (tBitmap - tAcquire)
-                            + "ms trim=" + (tTrim - tBitmap)
-                            + "ms save=" + (tSave - tTrim)
-                            + "ms total=" + (tSave - t0) + "ms");
-                    return outFile;
-                } finally {
-                    bmp.recycle();
+                    Thread.sleep(8);
                 }
-            } catch (Exception e) {
-                Log.w(TAG, "grab failed", e);
-                return null;
-            } finally {
-                if (img != null) {
-                    try { img.close(); } catch (Exception ignored) { }
-                }
+                Log.w(TAG, "grabFrame: no settled full-size frame within "
+                        + FRAME_DEADLINE_MS + "ms");
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } catch (RuntimeException error) {
+                Log.w(TAG, "grabFrame failed", error);
             }
+            return null;
+        }
+
+        /** Encode the complete frame after the overlay can safely reappear. */
+        public File encodeFile(Context context, Bitmap bitmap) {
+            if (bitmap == null) {
+                return null;
+            }
+            long start = SystemClock.elapsedRealtime();
+            try {
+                File output = saveJpeg(context, bitmap);
+                Log.i(TAG, "encoded full frame " + bitmap.getWidth() + "x" + bitmap.getHeight()
+                        + " elapsed=" + (SystemClock.elapsedRealtime() - start) + "ms");
+                return output;
+            } finally {
+                bitmap.recycle();
+            }
+        }
+
+        public File grab(Context context) {
+            return encodeFile(context, grabFrame());
         }
 
         void shutdown() {
-            if (closed) {
-                return;
+            synchronized (frameLock) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                if (displayManager != null) {
+                    displayManager.unregisterDisplayListener(displayListener);
+                }
+                handler.removeCallbacksAndMessages(null);
+                try { display.release(); } catch (RuntimeException ignored) { }
+                try { reader.close(); } catch (RuntimeException ignored) { }
+                thread.quitSafely();
             }
-            closed = true;
-            try { display.release(); } catch (Exception ignored) { }
-            try { reader.close(); } catch (Exception ignored) { }
-            try { thread.quitSafely(); } catch (Exception ignored) { }
         }
     }
 
-    /**
-     * Current screen size in pixels, in the orientation the device is in now.
-     *
-     * getRealMetrics() reports the physical panel size and does not follow the
-     * activity orientation, so it must not be used to size a capture surface.
-     */
-    public static int[] currentScreenSize(Context ctx) {
-        WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-        int[] out = new int[]{1080, 1920};
-        if (wm == null) {
-            return out;
+    /** Current logical full-display bounds, already rotated by the display system. */
+    public static int[] currentScreenSize(Context context) {
+        DisplayManager manager = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
+        Display source = manager == null ? null : manager.getDisplay(Display.DEFAULT_DISPLAY);
+        if (source != null) {
+            Point size = new Point();
+            source.getRealSize(size);
+            if (size.x > 0 && size.y > 0) {
+                return new int[] {size.x, size.y};
+            }
         }
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            android.view.WindowMetrics metrics = wm.getMaximumWindowMetrics();
-            android.graphics.Rect b = metrics.getBounds();
-            // getMaximumWindowMetrics still returns the natural bounds; prefer the
-            // configuration orientation to decide whether to swap.
-            boolean landscape = ctx.getResources().getConfiguration().orientation
-                    == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
-            int s = Math.min(b.width(), b.height());
-            int l = Math.max(b.width(), b.height());
-            out[0] = landscape ? l : s;
-            out[1] = landscape ? s : l;
-            return out;
+        WindowManager windows = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        if (windows != null && Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Rect bounds = windows.getMaximumWindowMetrics().getBounds();
+            return new int[] {bounds.width(), bounds.height()};
         }
-        DisplayMetrics dm = new DisplayMetrics();
-        wm.getDefaultDisplay().getRealMetrics(dm);
-        boolean landscape = ctx.getResources().getConfiguration().orientation
-                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
-        int s = Math.min(dm.widthPixels, dm.heightPixels);
-        int l = Math.max(dm.widthPixels, dm.heightPixels);
-        out[0] = landscape ? l : s;
-        out[1] = landscape ? s : l;
-        return out;
+        throw new IllegalStateException("Full display dimensions unavailable");
     }
 
-    /** Build the session for a freshly granted projection. Call once per consent. */
-    public static Session openSession(Context ctx, MediaProjection projection)
+    /** Called once per consent; orientation changes resize this same display. */
+    public static Session openSession(Context context, MediaProjection projection)
             throws NoConsentException {
         if (projection == null) {
             throw new NoConsentException();
         }
-        WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-        if (wm == null) {
-            throw new NoConsentException();
+        int[] size = currentScreenSize(context);
+        int density = context.getResources().getDisplayMetrics().densityDpi;
+        HandlerThread thread = new HandlerThread("capture");
+        thread.start();
+        ImageReader reader = null;
+        VirtualDisplay display = null;
+        try {
+            reader = ImageReader.newInstance(size[0], size[1], PixelFormat.RGBA_8888, 2);
+            display = projection.createVirtualDisplay("stitch-capture", size[0], size[1], density,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(),
+                    null, new Handler(thread.getLooper()));
+            if (display == null) {
+                throw new IllegalStateException("VirtualDisplay unavailable");
+            }
+            Session session = new Session(context, projection, reader, display, thread,
+                    size[0], size[1], density);
+            MediaProjectionHolder.setSession(session);
+            session.startMonitoring();
+            Log.i(TAG, "capture session opened " + size[0] + "x" + size[1]);
+            return session;
+        } catch (RuntimeException error) {
+            if (display != null) display.release();
+            if (reader != null) reader.close();
+            thread.quitSafely();
+            MediaProjectionHolder.setSession(null);
+            throw error;
         }
-        // Size the virtual display to the CURRENT screen orientation. Using the
-        // real metrics of a portrait-default display gave a 1264x2780 surface even
-        // in landscape, so landscape content was letterboxed with huge black
-        // bars at top and bottom.
-        int[] size = currentScreenSize(ctx);
-        final int width = size[0];
-        final int height = size[1];
-        DisplayMetrics dm = new DisplayMetrics();
-        wm.getDefaultDisplay().getRealMetrics(dm);
-        final int density = dm.densityDpi;
-
-        HandlerThread ht = new HandlerThread("capture");
-        ht.start();
-        Handler handler = new Handler(ht.getLooper());
-
-        ImageReader reader = ImageReader.newInstance(width, height,
-                PixelFormat.RGBA_8888, 2);
-        // ONE VirtualDisplay per projection, reused for every screenshot.
-        VirtualDisplay vd = projection.createVirtualDisplay(
-                "stitch-capture",
-                width, height, density,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.getSurface(), null, handler);
-
-        Session s = new Session(projection, reader, vd, ht, width, height);
-        MediaProjectionHolder.setSession(s);
-        Log.i(TAG, "capture session opened " + width + "x" + height);
-        return s;
     }
 
-    /** Close the current session (projection revoked or app shutting down). */
     public static void closeSession() {
-        Session s = MediaProjectionHolder.getSession();
-        if (s != null) {
-            s.shutdown();
+        Session session = MediaProjectionHolder.getSession();
+        if (session != null) {
+            session.shutdown();
             MediaProjectionHolder.setSession(null);
             Log.i(TAG, "capture session closed");
         }
     }
 
-    /** True while a capture session is usable. */
-    public static boolean hasConsent(Context ctx) {
-        Session s = MediaProjectionHolder.getSession();
-        return s != null && s.isAlive();
+    public static boolean hasConsent(Context context) {
+        Session session = MediaProjectionHolder.getSession();
+        return session != null && session.isAlive();
     }
 
     private static Bitmap toBitmap(Image image) {
@@ -337,133 +393,85 @@ public final class ScreenCapture {
         int pixelStride = plane.getPixelStride();
         int rowStride = plane.getRowStride();
         int rowPadding = rowStride - pixelStride * image.getWidth();
-        int bmpWidth = image.getWidth() + rowPadding / pixelStride;
-
-        Bitmap bmp = Bitmap.createBitmap(bmpWidth, image.getHeight(),
-                Bitmap.Config.ARGB_8888);
-        bmp.copyPixelsFromBuffer(buffer);
-        if (bmpWidth == image.getWidth()) {
-            return bmp;
+        int bitmapWidth = image.getWidth() + rowPadding / pixelStride;
+        Bitmap bitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
+        bitmap.copyPixelsFromBuffer(buffer);
+        if (bitmapWidth == image.getWidth()) {
+            return bitmap;
         }
-        Bitmap cropped = Bitmap.createBitmap(bmp, 0, 0,
-                image.getWidth(), image.getHeight());
-        bmp.recycle();
-        return cropped;
+        // This removes buffer alignment padding, never pixels classified by color.
+        Bitmap output = Bitmap.createBitmap(bitmap, 0, 0, image.getWidth(), image.getHeight());
+        bitmap.recycle();
+        return output;
     }
 
-    private static File savePng(Context ctx, Bitmap bmp) {
-        File dir = new File(ctx.getCacheDir(), "captured");
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
-        // JPEG, not PNG: PNG compression took ~1.4 s of the ~1.5 s capture
-        // (PNG is lossless and re-compresses every pixel). A screenshot has no
-        // transparency and quality 95 is visually identical, so JPEG at 95 is
-        // the right trade-off here.
-        File out = new File(dir, "shot_" + System.currentTimeMillis() + ".jpg");
-        try (FileOutputStream fos = new FileOutputStream(out)) {
-            bmp.compress(Bitmap.CompressFormat.JPEG, 95, fos);
-            return out;
-        } catch (Exception e) {
-            Log.w(TAG, "savePng failed", e);
+    private static File saveJpeg(Context context, Bitmap bitmap) {
+        File directory = new File(context.getCacheDir(), "captured");
+        if (!directory.exists()) directory.mkdirs();
+        File output = new File(directory, "shot_" + System.currentTimeMillis() + ".jpg");
+        try (FileOutputStream stream = new FileOutputStream(output)) {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream);
+            return output;
+        } catch (Exception error) {
+            Log.w(TAG, "saveJpeg failed", error);
             return null;
         }
     }
 
-    /**
-     * Holds the projection plus its single capture session.
-     *
-     * The projection lives for the process lifetime; it dies only when the system
-     * revokes it (onStop) or the user stops capturing from the status bar.
-     */
     public static final class MediaProjectionHolder {
-        private static MediaProjection sProjection;
+        private static volatile MediaProjection sProjection;
+        private static MediaProjection sCallbackOwner;
         private static MediaProjection.Callback sCallback;
-        private static Session sSession;
+        private static volatile Session sSession;
 
         private MediaProjectionHolder() { }
-
-        public static MediaProjection get() {
-            return sProjection;
-        }
-
-        static Session getSession() {
-            return sSession;
-        }
-
-        static void setSession(Session s) {
-            sSession = s;
-        }
-
-        public static void set(MediaProjection p) {
-            sProjection = p;
-        }
-
+        public static MediaProjection get() { return sProjection; }
+        static Session getSession() { return sSession; }
+        static void setSession(Session session) { sSession = session; }
+        public static void set(MediaProjection projection) { sProjection = projection; }
         public static void clear() {
             sProjection = null;
+            sCallbackOwner = null;
             sCallback = null;
             sSession = null;
         }
-
-        public static MediaProjectionManager manager(Context ctx) {
-            return (MediaProjectionManager) ctx.getSystemService(
-                    Context.MEDIA_PROJECTION_SERVICE);
+        public static MediaProjectionManager manager(Context context) {
+            return (MediaProjectionManager) context.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         }
-
-        /**
-         * Consume the system consent result and create the projection.
-         *
-         * getMediaProjection() is valid exactly ONCE per consent token, so this
-         * is the single entry point; on failure the user must approve again.
-         */
-        public static MediaProjection create(Context ctx, int resultCode, Intent data)
-                throws Exception {
-            MediaProjectionManager mgr = manager(ctx);
-            if (mgr == null) {
-                throw new IllegalStateException("MediaProjectionManager unavailable");
-            }
-            MediaProjection p = mgr.getMediaProjection(resultCode, data);
-            if (p == null) {
-                throw new IllegalStateException("getMediaProjection returned null");
-            }
-            // Android 14+ requires a callback before any capture starts.
-            ensureCallback(p);
-            sProjection = p;
-            return p;
+        public static MediaProjection create(Context context, int resultCode, Intent data) {
+            MediaProjectionManager manager = manager(context);
+            if (manager == null) throw new IllegalStateException("MediaProjectionManager unavailable");
+            MediaProjection projection = manager.getMediaProjection(resultCode, data);
+            if (projection == null) throw new IllegalStateException("getMediaProjection returned null");
+            sProjection = projection;
+            ensureCallback(projection);
+            return projection;
         }
-
-        /**
-         * Register the mandatory state callback once per projection. Without it
-         * createVirtualDisplay() throws on Android 14+.
-         */
-        private static void ensureCallback(final MediaProjection p) {
-            if (sCallback != null) {
-                return;
-            }
+        private static void ensureCallback(final MediaProjection projection) {
+            if (sCallbackOwner == projection) return;
             sCallback = new MediaProjection.Callback() {
-                @Override
-                public void onStop() {
+                @Override public void onStop() {
+                    // A delayed stop from an old consent must not close a newer session.
+                    if (sProjection != projection) return;
                     Log.w(TAG, "MediaProjection revoked by the system");
                     closeSession();
                     sProjection = null;
+                    sCallbackOwner = null;
                     sCallback = null;
                 }
-
-                @Override
-                public void onCapturedContentResize(int width, int height) {
-                    // The single VirtualDisplay cannot be recreated for this
-                    // projection, so instead of rebuilding we recrop: grab()
-                    // trims uniform black bars around the mirrored content.
+                @Override public void onCapturedContentResize(int width, int height) {
+                    Session session = sSession;
+                    if (session != null && session.projection == projection) {
+                        session.requestSize(width, height, true);
+                    }
                     Log.i(TAG, "captured content resized to " + width + "x" + height);
                 }
-
-                @Override
-                public void onCapturedContentVisibilityChanged(boolean isVisible) {
-                    Log.i(TAG, "captured content visible=" + isVisible);
+                @Override public void onCapturedContentVisibilityChanged(boolean visible) {
+                    Log.i(TAG, "captured content visible=" + visible);
                 }
             };
-            p.registerCallback(sCallback,
-                    new Handler(android.os.Looper.getMainLooper()));
+            projection.registerCallback(sCallback, new Handler(android.os.Looper.getMainLooper()));
+            sCallbackOwner = projection;
         }
     }
 }

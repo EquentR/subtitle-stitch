@@ -3,12 +3,10 @@ package com.equentr.subtitlestitch;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.util.Log;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -74,9 +72,6 @@ public final class StitchEngine {
 
     private StitchEngine() { }
 
-    /** Reusable row buffer so trimming does not allocate per scan line. */
-    private static int[] sRowBuf;
-
     public static float clamp01(float v) {
         return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
@@ -139,21 +134,15 @@ public final class StitchEngine {
         if (n == 0) {
             return null;
         }
-        // 1. probe sizes, accounting for black-bar trimming.
+        // 1. Probe original source sizes. Manual crop windows are applied below.
         int[] ws = new int[n];
         int[] hs = new int[n];
         for (int i = 0; i < n; i++) {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
             BitmapFactory.decodeFile(paths.get(i), o);
-            int ow = Math.max(1, o.outWidth);
-            int oh = Math.max(1, o.outHeight);
-            // Measure the content box once at low resolution so band heights are
-            // computed from the TRIMMED image. Otherwise the layout reserves space
-            // for the black bars and the result keeps a big empty margin.
-            float[] box = probeContentBox(paths.get(i), ow, oh);
-            ws[i] = Math.max(1, Math.round(ow * (box[2] - box[0])));
-            hs[i] = Math.max(1, Math.round(oh * (box[3] - box[1])));
+            ws[i] = Math.max(1, o.outWidth);
+            hs[i] = Math.max(1, o.outHeight);
         }
 
         // 2. output width = the most common (narrowest) width, so nothing is
@@ -231,25 +220,12 @@ public final class StitchEngine {
                 // fall back to a coarser sample only if full size fails (OOM)
                 src = decodeSampled(paths.get(i), Math.max(ws[i], hs[i]) / 2);
             }
-            Bitmap owned = null;
             if (src != null) {
-                // Strip uniform black bars HERE rather than only when capturing:
-                // this covers screenshots taken by an older build, gallery picks,
-                // and captures whose orientation did not match the surface.
-                Bitmap trimmed = trimBlackBorders(src);
-                if (trimmed != src) {
-                    owned = trimmed;
-                    src = trimmed;
-                }
-                // Map the user's crop window onto the TRIMMED content only.
+                // Apply only the user's manual crop window to the original source.
                 Rect s = cw[i].srcRect(src.getWidth(), src.getHeight());
                 Rect d = new Rect(0, y, outW, y + bandH[i]);
                 canvas.drawBitmap(src, s, d, paint);
-                if (owned != null) {
-                    owned.recycle();
-                } else {
-                    src.recycle();
-                }
+                src.recycle();
             } else {
                 Log.w("StitchEngine", "could not decode " + paths.get(i));
             }
@@ -259,187 +235,6 @@ public final class StitchEngine {
             }
         }
         return out;
-    }
-
-    /**
-     * Remove uniform black bars around the captured content.
-     *
-     * Returns the same instance when nothing needed trimming (so the caller can
-     * tell whether it must recycle the result separately).
-     */
-    /**
-     * Estimate the content rectangle (fractions 0..1) of an image, ignoring
-     * uniform black bars. Uses a low-resolution decode: this only needs to be
-     * accurate enough to size the output, the real trim happens per band.
-     */
-    /** Detect the content box of a bitmap: returns {left, top, right, bottom}. */
-    public static int[] contentBox(Bitmap src) {
-        final int w = src.getWidth();
-        final int h = src.getHeight();
-        int[] full = new int[]{0, 0, w, h};
-        if (w < 16 || h < 16) {
-            return full;
-        }
-        final int threshold = 36;   // JPEG noise / slight glow above a bar
-        int top = 0, bottom = h - 1, left = 0, right = w - 1;
-        while (top < h / 3 && rowIsBlack(src, w, top, threshold)) top++;
-        while (bottom > h * 2 / 3 && rowIsBlack(src, w, bottom, threshold)) bottom--;
-        while (left < w / 3 && colIsBlack(src, h, left, threshold)) left++;
-        while (right > w * 2 / 3 && colIsBlack(src, h, right, threshold)) right--;
-        int nw = right - left + 1;
-        int nh = bottom - top + 1;
-        if (nw < w / 2 || nh < h / 4) {
-            return full;             // implausible, keep everything
-        }
-        return new int[]{left, top, left + nw, top + nh};
-    }
-
-    /**
-     * Per-row blackness using a bulk pixel read.
-     *
-     * Bitmap.getPixel() in a loop is very slow for a 1264x2780 screenshot (we
-     * measured it dominating the whole capture). getPixels() copies a whole row
-     * in one JNI call instead.
-     */
-    private static boolean rowIsBlack(Bitmap b, int w, int y, int t) {
-        int[] row = sRowBuf;
-        if (row == null || row.length < w) {
-            row = new int[w];
-            sRowBuf = row;
-        }
-        b.getPixels(row, 0, w, 0, y, w, 1);
-        for (int x = 0; x < w; x += 4) {
-            int c = row[x];
-            int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, bl = c & 0xFF;
-            if (r > t || g > t || bl > t) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static boolean colIsBlack(Bitmap b, int h, int x, int t) {
-        // Column scans are rare (only when the image is letterboxed sideways), so
-        // a modest sampling step keeps them cheap without getPixel() per pixel.
-        int step = Math.max(1, h / 64);
-        for (int y = 0; y < h; y += step) {
-            int c = b.getPixel(x, y);
-            if (((c >> 16) & 0xFF) > t || ((c >> 8) & 0xFF) > t || (c & 0xFF) > t) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Crop a bitmap to the given fractional content box.
-     *
-     * Cropping by FRACTION (not by absolute pixels) guarantees the grid preview
-     * and the zoom editor produce identical framing even though they are decoded
-     * at different resolutions.
-     */
-    public static Bitmap cropToFractions(Bitmap src, float[] box) {
-        if (src == null || box == null) {
-            return src;
-        }
-        int w = src.getWidth();
-        int h = src.getHeight();
-        int l = Math.round(box[0] * w);
-        int t = Math.round(box[1] * h);
-        int r = Math.round(box[2] * w);
-        int b = Math.round(box[3] * h);
-        l = Math.max(0, Math.min(w - 1, l));
-        t = Math.max(0, Math.min(h - 1, t));
-        r = Math.max(l + 1, Math.min(w, r));
-        b = Math.max(t + 1, Math.min(h, b));
-        if (l == 0 && t == 0 && r == w && b == h) {
-            return src;                 // nothing to do
-        }
-        return Bitmap.createBitmap(src, l, t, r - l, b - t);
-    }
-
-    /**
-     * Content rectangle of an image as fractions {l, t, r, b}, measured on a
-     * small decode. Used while planning the layout so band heights are based on
-     * the trimmed image rather than including black bars.
-     */
-    public static float[] probeContentBox(String path, int w, int h) {
-        float[] full = new float[]{0f, 0f, 1f, 1f};
-        if (w < 32 || h < 32) {
-            return full;
-        }
-        Bitmap small = null;
-        try {
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inSampleSize = Math.max(1, Math.max(w, h) / 256);
-            small = BitmapFactory.decodeFile(path, o);
-            if (small == null) {
-                return full;
-            }
-            int[] b = contentBox(small);
-            if (b[0] == 0 && b[1] == 0
-                    && b[2] == small.getWidth() && b[3] == small.getHeight()) {
-                return full;
-            }
-            return new float[]{
-                    b[0] / (float) small.getWidth(),
-                    b[1] / (float) small.getHeight(),
-                    b[2] / (float) small.getWidth(),
-                    b[3] / (float) small.getHeight()};
-        } catch (Exception e) {
-            return full;
-        } finally {
-            if (small != null && !small.isRecycled()) {
-                small.recycle();
-            }
-        }
-    }
-
-    public static Bitmap trimBlackBorders(Bitmap src) {
-        final int w = src.getWidth();
-        final int h = src.getHeight();
-        if (w < 16 || h < 16) {
-            return src;
-        }
-        final int threshold = 36;   // JPEG noise / slight glow above a bar      // treat near-black as bar
-        int top = 0, bottom = h - 1, left = 0, right = w - 1;
-
-        java.util.function.IntPredicate rowIsBlack = y -> {
-            for (int x = 0; x < w; x += 7) {
-                int c = src.getPixel(x, y);
-                int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-                if (r > threshold || g > threshold || b > threshold) {
-                    return false;
-                }
-            }
-            return true;
-        };
-        java.util.function.IntPredicate colIsBlack = x -> {
-            for (int y = 0; y < h; y += 7) {
-                int c = src.getPixel(x, y);
-                int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-                if (r > threshold || g > threshold || b > threshold) {
-                    return false;
-                }
-            }
-            return true;
-        };
-
-        while (top < h / 3 && rowIsBlack.test(top)) top++;
-        while (bottom > h * 2 / 3 && rowIsBlack.test(bottom)) bottom--;
-        while (left < w / 3 && colIsBlack.test(left)) left++;
-        while (right > w * 2 / 3 && colIsBlack.test(right)) right--;
-
-        if (top == 0 && left == 0 && bottom == h - 1 && right == w - 1) {
-            return src;
-        }
-        int nw = right - left + 1;
-        int nh = bottom - top + 1;
-        if (nw < w / 2 || nh < h / 4) {
-            return src;   // implausible result, keep the original
-        }
-        android.util.Log.i("StitchEngine", "trimmed black bars: " + w + "x" + h + " -> " + nw + "x" + nh);
-        return Bitmap.createBitmap(src, left, top, nw, nh);
     }
 
     /**
@@ -477,9 +272,7 @@ public final class StitchEngine {
     }
 
     /**
-     * Estimate a sensible default crop for neighbouring screenshots: keep the
-     * full image but trim nothing. (Automatic overlap detection is intentionally
-     * out of scope -- the draggable handles let the user decide precisely.)
+     * Default full-frame crop list for manually controlled neighbouring screenshots.
      */
     public static List<CropWindow> defaultCrops(int count) {
         List<CropWindow> list = new ArrayList<>(count);

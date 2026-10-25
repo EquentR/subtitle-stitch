@@ -28,7 +28,7 @@ public class ConsentProxyActivity extends Activity {
             return;
         }
         try {
-            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_PROJECTION);
+            startActivityForResult(ScreenCapture.createConsentIntent(this), REQ_PROJECTION);
         } catch (Exception e) {
             Log.w(TAG, "cannot start consent dialog", e);
             finish();

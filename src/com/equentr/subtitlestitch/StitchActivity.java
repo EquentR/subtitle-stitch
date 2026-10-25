@@ -67,8 +67,6 @@ public class StitchActivity extends Activity {
         ItemView view;
         /** true when this Item owns its bitmap (the zoom editor's hi-res copy). */
         boolean ownsBitmap = false;
-        /** Content box as fractions, shared by the grid preview and zoom editor. */
-        float[] contentBox = new float[]{0f, 0f, 1f, 1f};
         /** true for index>0 when the series uses linked cropping */
         boolean linked = false;
     }
@@ -389,27 +387,6 @@ public class StitchActivity extends Activity {
                 // the zoom editor scales the preview up to full screen, and a
                 // 900px cap made it visibly blurry there.
                 it.bitmap = StitchEngine.decodeSampled(it.path, 2048);
-                if (it.bitmap != null) {
-                    // Measure the content box ONCE and remember it. Both the grid
-                    // preview and the zoom editor then crop by the same fractions,
-                    // so the crop window never shifts between them.
-                    int[] box = StitchEngine.contentBox(it.bitmap);
-                    if (box[0] != 0 || box[1] != 0
-                            || box[2] != it.bitmap.getWidth()
-                            || box[3] != it.bitmap.getHeight()) {
-                        it.contentBox = new float[]{
-                                box[0] / (float) it.bitmap.getWidth(),
-                                box[1] / (float) it.bitmap.getHeight(),
-                                box[2] / (float) it.bitmap.getWidth(),
-                                box[3] / (float) it.bitmap.getHeight()};
-                        Bitmap croppedPreview =
-                                StitchEngine.cropToFractions(it.bitmap, it.contentBox);
-                        if (croppedPreview != it.bitmap) {
-                            it.bitmap.recycle();
-                            it.bitmap = croppedPreview;
-                        }
-                    }
-                }
                 if (it.bitmap == null) {
                     continue;
                 }
@@ -853,18 +830,9 @@ public class StitchActivity extends Activity {
 
         // A dedicated crop view bound to a scratch Item whose crop we copy back.
         final Item scratch = new Item();
-        // Load a HIGH-RES copy for the zoom editor, but run it through the SAME
-        // black-bar trimming the grid preview uses. Without the trim the zoom
-        // view shows the bars and its crop fractions are relative to the
-        // untrimmed height, so the window jumped upward once back in the grid.
+        // Load a HIGH-RES copy for the zoom editor; manual crop fractions remain
+        // relative to the original source bounds.
         Bitmap hiRes = StitchEngine.decodeSampled(item.path, 4096);
-        if (hiRes != null) {
-            Bitmap cropped = StitchEngine.cropToFractions(hiRes, item.contentBox);
-            if (cropped != hiRes) {
-                hiRes.recycle();
-                hiRes = cropped;
-            }
-        }
         scratch.bitmap = hiRes != null ? hiRes : item.bitmap;
         scratch.ownsBitmap = hiRes != null;
         scratch.path = item.path;
