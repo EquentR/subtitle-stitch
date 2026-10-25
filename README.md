@@ -185,9 +185,70 @@ test.bat        # Windows
 
 运行测试只需 `android.jar` 作编译期 classpath，测试代码运行时不触碰任何 Android 类。
 
-## 持续集成
+## 持续集成与发布
 
-`.github/workflows/build.yml` 在每次 push 和 PR 时运行测试并构建 APK，产物可在 Actions 的 artifact 中下载。
+### CI（`.github/workflows/build.yml`）
+
+每次 push 和 PR 自动运行：单元测试 → 构建 APK → 验证签名 → 上传构件。
+产物在 Actions 页面对应的 run 里下载。
+
+### 发布（`.github/workflows/release.yml`）
+
+推送一个 `vX.Y.Z` 形式的 tag 即可发布：
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+工作流会：
+
+1. 从 tag 推导版本号
+   - `versionName` = tag 去掉前缀 `v`（`v1.2.0` → `1.2.0`）
+   - `versionCode` = `major*10000 + minor*100 + patch`（`1.2.0` → `10200`）
+2. 运行单元测试
+3. 构建 `--release` APK
+4. 校验 tag 确实写入了清单（防止版本号错位）
+5. 创建 GitHub Release，附带 `SubtitleStitch-<版本>.apk` 和 `.sha256` 校验文件
+
+也可以在 Actions 页面手动触发并指定 tag。
+
+#### 关于发布签名
+
+默认使用**每次运行临时生成的 debug 密钥**签名，便于先跑通流程。这有两个后果：
+
+- 每次构建签名不同，用户**无法覆盖升级**
+- 不适合正式分发
+
+要发布可长期升级的正式版本，添加三个仓库 Secrets：
+
+| Secret | 内容 |
+|---|---|
+| `KEYSTORE_BASE64` | PKCS#12 密钥库的 base64 |
+| `KEYSTORE_PASS` | 密钥库口令 |
+| `KEYSTORE_ALIAS` | 密钥别名 |
+
+生成并上传：
+
+```bash
+keytool -genkeypair -keystore release.p12 -storetype PKCS12 \
+  -alias release -keyalg RSA -keysize 2048 -validity 10000 \
+  -storepass <口令> -keypass <口令> -dname "CN=Your Name"
+
+base64 -w0 release.p12 > release.b64     # Windows: certutil -encode release.p12 out.txt
+
+gh secret set KEYSTORE_BASE64 < release.b64
+gh secret set KEYSTORE_PASS
+gh secret set KEYSTORE_ALIAS
+```
+
+配置后工作流会自动优先使用该密钥库；`release.p12` 本身不要提交到仓库。
+
+#### 版本号也可以在本地覆盖
+
+```bash
+STITCH_VERSION_NAME=1.2.0 STITCH_VERSION_CODE=10200 ./build.sh --release
+```
 
 ## 代码结构
 
