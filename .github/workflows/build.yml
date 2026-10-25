@@ -14,25 +14,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # android.jar and the build-tools are required by build.sh
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # The GitHub runner image already ships a usable Android SDK. We use it
+      # directly instead of android-actions/setup-android, because that action
+      # requests the legacy "tools" package, which no longer exists in the
+      # repository and makes sdkmanager fail.
+      - name: Locate Android SDK
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            echo "Android SDK not found" >&2
+            exit 1
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "Using SDK at $SDK"
 
       - name: Install SDK packages
         run: |
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
-          # build-tools ship as a zip; make sure the binaries are executable
+          # pick whichever cmdline-tools the image provides
+          if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKM="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKM="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -name sdkmanager -type f | head -1)"
+          fi
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 || true
+          "$SDKM" --sdk_root="$ANDROID_SDK_ROOT" \
+            "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          # the build-tools zip does not always carry the executable bit
           find "$ANDROID_SDK_ROOT/build-tools" -maxdepth 2 -type f \
-            \( -name aapt2 -o -name zipalign \) -exec chmod +x {} +
+            \( -name aapt2 -o -name zipalign -o -name apksigner -o -name d8 \) \
+            -exec chmod +x {} +
 
       - name: Run unit tests
-        run: ./test.sh
+        run: |
+          chmod +x test.sh
+          ./test.sh
 
       - name: Build APK
         run: |
@@ -41,8 +63,14 @@ jobs:
 
       - name: Verify signature
         run: |
-          "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" verify \
-            --print-certs "$RUNNER_TEMP/build/SubtitleStitch.apk"
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | head -1)"
+          "$APKSIGNER" verify --print-certs "$RUNNER_TEMP/build/SubtitleStitch.apk"
+
+      - name: Show APK info
+        run: |
+          AAPT2="$(find "$ANDROID_SDK_ROOT/build-tools" -name aapt2 -type f | head -1)"
+          "$AAPT2" dump badging "$RUNNER_TEMP/build/SubtitleStitch.apk" | head -5
+          ls -lh "$RUNNER_TEMP/build/SubtitleStitch.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
