@@ -743,7 +743,7 @@ public class StitchActivity extends Activity {
             status.setText("已清空捕获列表");
             toast("已清空");
         });
-        session.addView(clear);
+        addAction(session, clear);
 
         Button stop = small("关闭监听");
         stop.setOnClickListener(v -> {
@@ -751,7 +751,8 @@ public class StitchActivity extends Activity {
             status.setText("已关闭监听");
             toast("已关闭监听");
         });
-        session.addView(stop);
+        styleButton(stop, ButtonStyle.QUIET);
+        addAction(session, stop);
         box.addView(session);
 
         d.setContentView(box);
@@ -792,10 +793,11 @@ public class StitchActivity extends Activity {
         head.setPadding(dp(8), dp(8), dp(8), dp(8));
         TextView t = new TextView(this);
         t.setText("精细调节裁剪区");
-        t.setTextColor(Color.WHITE);
+        t.setTextColor(cText());
         t.setTextSize(15);
         head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         Button done = small("完成");
+        styleButton(done, ButtonStyle.PRIMARY);
         head.addView(done);
         box.addView(head);
 
@@ -914,19 +916,19 @@ public class StitchActivity extends Activity {
         }
 
         private Button mini(String text) {
-            Button b = new Button(StitchActivity.this);
-            b.setText(text);
-            b.setAllCaps(false);
-            b.setTextSize(10);
-            b.setTextColor(cBtnText());
-            b.setBackgroundColor(cBtn());
-            b.setPadding(0, 0, 0, 0);
-            b.setMinWidth(0);
-            b.setMinimumWidth(0);
-            LayoutParams lp = new LayoutParams(dp(26), dp(26));
-            lp.setMargins(dp(2), 0, 0, 0);
-            b.setLayoutParams(lp);
-            return b;
+            Button button = small(text);
+            button.setTextSize(12);
+            button.setContentDescription("删除图片");
+            button.setPadding(0, 0, 0, 0);
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
+            button.setMinHeight(0);
+            button.setMinimumHeight(0);
+            styleButton(button, ButtonStyle.DESTRUCTIVE);
+            LayoutParams params = new LayoutParams(dp(36), dp(36));
+            params.setMargins(dp(4), 0, 0, 0);
+            button.setLayoutParams(params);
+            return button;
         }
     }
 

@@ -250,6 +250,7 @@ pack_apk() {
     # drop any signature files aapt2 may have carried over
     zip -q -d "$OUT/unsigned.apk" 'META-INF/*' >/dev/null 2>&1 || true
 }
+pack_apk
 
 step "zipalign"
 "$ZIPALIGN" -p -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
