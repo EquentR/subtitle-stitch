@@ -23,8 +23,11 @@ set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
 set "PACKAGE=com.equentr.subtitlestitch"
-set "VERSION_NAME=1.1.0"
-set "VERSION_CODE=2"
+rem Version can be overridden from the environment so a release tag can drive it.
+if "%STITCH_VERSION_NAME%"=="" (set "STITCH_VERSION_NAME=1.1.0")
+if "%STITCH_VERSION_CODE%"=="" (set "STITCH_VERSION_CODE=2")
+set "VERSION_NAME=%STITCH_VERSION_NAME%"
+set "VERSION_CODE=%STITCH_VERSION_CODE%"
 set "MIN_SDK=29"
 set "TARGET_SDK=36"
 set "BUILD_TOOLS_VERSION=36.0.0"
@@ -213,7 +216,7 @@ echo ==^> verify
 if errorlevel 1 exit /b 1
 
 echo.
-echo BUILD OK: %OUT_DIR%\SubtitleStitch.apk
+echo BUILD OK: v%VERSION_NAME% ^(%VERSION_CODE%^) %OUT_DIR%\SubtitleStitch.apk
 
 rem ---------------------------------------------------------------- install
 

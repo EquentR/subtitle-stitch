@@ -27,8 +27,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PACKAGE="com.equentr.subtitlestitch"
-VERSION_NAME="1.1.0"
-VERSION_CODE="2"
+# Version can be overridden so a release tag can drive it (STITCH_VERSION_NAME /
+# STITCH_VERSION_CODE, used by the release workflow).
+VERSION_NAME="${STITCH_VERSION_NAME:-1.1.0}"
+VERSION_CODE="${STITCH_VERSION_CODE:-2}"
 MIN_SDK="29"
 TARGET_SDK="36"
 BUILD_TOOLS_VERSION="36.0.0"
@@ -75,6 +77,8 @@ if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
 fi
 JAVA_HOME="${JAVA_HOME:-$(prop java.home || true)}"
 
+# Keystore settings: STITCH_KEYSTORE / STITCH_KS_PASS / STITCH_KS_ALIAS from the
+# environment (this is what CI sets), otherwise local.properties.
 KS_PATH="${STITCH_KEYSTORE:-$(prop keystore.path || true)}"
 KS_PASS="${STITCH_KS_PASS:-$(prop keystore.pass || echo android)}"
 KS_ALIAS="${STITCH_KS_ALIAS:-$(prop keystore.alias || echo debug)}"
@@ -245,7 +249,8 @@ step "verify"
 
 size="$(wc -c < "$OUT/SubtitleStitch.apk" | tr -d ' ')"
 kind="debug"; [ "$RELEASE" -eq 1 ] && kind="release"
-printf '\nBUILD OK (%s): %s (%s bytes)\n' "$kind" "$OUT/SubtitleStitch.apk" "$size"
+printf '\nBUILD OK (%s) v%s (%s): %s (%s bytes)\n' \
+    "$kind" "$VERSION_NAME" "$VERSION_CODE" "$OUT/SubtitleStitch.apk" "$size"
 
 # --------------------------------------------------------------- install
 
