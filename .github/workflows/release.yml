@@ -96,7 +96,24 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "Using the keystore from repository secrets."
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.p12"
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.p12"
+            KS_SIZE=$(wc -c < "$RUNNER_TEMP/release.p12" | tr -d ' ')
+            echo "decoded keystore: $KS_SIZE bytes"
+            if [ "$KS_SIZE" -lt 100 ]; then
+              echo "::error::decoded keystore is only $KS_SIZE bytes -- the KEYSTORE_BASE64 secret looks wrong"
+              exit 1
+            fi
+            # fail early with a clear message if the alias/password do not match
+            if ! keytool -list -keystore "$RUNNER_TEMP/release.p12" \
+                    -storetype PKCS12 -storepass "$KEYSTORE_PASS" \
+                    -alias "$KEYSTORE_ALIAS" > /dev/null 2>&1; then
+              echo "::error::cannot open the keystore with the given alias/password"
+              echo "aliases present:"
+              keytool -list -keystore "$RUNNER_TEMP/release.p12" \
+                  -storetype PKCS12 -storepass "$KEYSTORE_PASS" 2>&1 | head -20 || true
+              exit 1
+            fi
+            echo "keystore OK (alias: $KEYSTORE_ALIAS)"
             {
               echo "STITCH_KEYSTORE=$RUNNER_TEMP/release.p12"
               echo "STITCH_KS_PASS=${KEYSTORE_PASS:-android}"

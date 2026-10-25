@@ -218,8 +218,13 @@ step "zipalign"
 
 # ------------------------------------------------------------------ sign
 
-step "generate debug keystore"
+if [ -n "$KS_PATH" ] && [ ! -f "$KS_PATH" ]; then
+    echo "ERROR: keystore not found at $KS_PATH" >&2
+    exit 1
+fi
+
 if [ -z "$KS_PATH" ] || [ ! -f "$KS_PATH" ]; then
+    step "generate debug keystore"
     KS_PATH="$OUT/debug.keystore"
     if [ ! -f "$KS_PATH" ]; then
         keytool -genkeypair -keystore "$KS_PATH" -storetype PKCS12 \
