@@ -3,6 +3,10 @@ package com.equentr.subtitlestitch;
 import android.app.Activity;
 import android.app.ProgressDialog;
 import android.content.Intent;
+import android.content.res.ColorStateList;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -146,12 +150,12 @@ public class StitchActivity extends Activity {
 
     /** Plain button background. */
     private int cBtn() {
-        return isDark() ? Color.parseColor("#2A3038") : Color.parseColor("#E8EEF9");
+        return isDark() ? Color.parseColor("#273345") : Color.parseColor("#EFF3F9");
     }
 
     /** Plain button text. */
     private int cBtnText() {
-        return isDark() ? Color.WHITE : Color.parseColor("#1F6FEB");
+        return Color.parseColor(isDark() ? "#A5C8FF" : "#245DC1");
     }
 
     private int dp(float v) {
@@ -172,6 +176,7 @@ public class StitchActivity extends Activity {
         bar.setBackgroundColor(cBar());
 
         Button back = small("返回");
+        styleButton(back, ButtonStyle.QUIET);
         back.setOnClickListener(v -> finish());
         bar.addView(back);
 
@@ -189,6 +194,7 @@ public class StitchActivity extends Activity {
         bar.addView(add);
 
         exportBtn = small("导出");
+        styleButton(exportBtn, ButtonStyle.PRIMARY);
         exportBtn.setOnClickListener(v -> export());
         bar.addView(exportBtn);
         root.addView(bar);
@@ -243,18 +249,60 @@ public class StitchActivity extends Activity {
         return root;
     }
 
+    private enum ButtonStyle { PRIMARY, SECONDARY, QUIET, DESTRUCTIVE }
+
     private Button small(String text) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setAllCaps(false);
-        b.setTextSize(13);
-        b.setTextColor(cBtnText());
-        b.setBackgroundColor(cBtn());
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(38));
-        lp.setMargins(dp(4), 0, dp(4), 0);
-        b.setLayoutParams(lp);
-        return b;
+        Button button = new Button(this);
+        button.setText(text);
+        button.setAllCaps(false);
+        button.setTextSize(14);
+        button.setTypeface(null, Typeface.BOLD);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(dp(48));
+        button.setMinimumHeight(dp(48));
+        button.setMinWidth(dp(64));
+        button.setMinimumWidth(dp(64));
+        button.setPadding(dp(14), dp(10), dp(14), dp(10));
+        button.setStateListAnimator(null);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.setMargins(dp(4), 0, dp(4), 0);
+        button.setLayoutParams(params);
+        styleButton(button, ButtonStyle.SECONDARY);
+        return button;
+    }
+
+    private void styleButton(Button button, ButtonStyle style) {
+        int fill = cBtn();
+        int text = cBtnText();
+        if (style == ButtonStyle.PRIMARY) {
+            fill = Color.parseColor("#245DC1");
+            text = Color.WHITE;
+        } else if (style == ButtonStyle.QUIET) {
+            fill = Color.TRANSPARENT;
+            text = cSubtle();
+        } else if (style == ButtonStyle.DESTRUCTIVE) {
+            fill = Color.parseColor(isDark() ? "#422B30" : "#FCEDEF");
+            text = Color.parseColor(isDark() ? "#FFB4BD" : "#A32D40");
+        }
+        int[][] states = new int[][] {
+                new int[] {-android.R.attr.state_enabled}, new int[] {}};
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(14));
+        background.setColor(new ColorStateList(states,
+                new int[] {cBtn(), fill}));
+        button.setTextColor(new ColorStateList(states,
+                new int[] {cSubtle2(), text}));
+        button.setBackgroundTintList(null);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(
+                isDark() ? 0x33FFFFFF : 0x220F3F80), background, null));
+    }
+
+    private void addAction(LinearLayout row, Button button) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        params.setMargins(dp(4), 0, dp(4), 0);
+        row.addView(button, params);
     }
 
     // --------------------------------------------------------------- loading
@@ -615,7 +663,8 @@ public class StitchActivity extends Activity {
         head.setPadding(dp(12), dp(10), dp(12), dp(6));
         TextView t = new TextView(this);
         t.setText("预览");
-        t.setTextColor(Color.WHITE);
+        t.setTextColor(cText());
+        t.setTypeface(null, Typeface.BOLD);
         t.setTextSize(16);
         head.addView(t, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -656,9 +705,10 @@ public class StitchActivity extends Activity {
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
-        actions.setPadding(dp(8), dp(4), dp(8), dp(10));
+        actions.setPadding(dp(12), dp(8), dp(12), dp(10));
 
-        Button save = small("保存");
+        Button save = small("保存到相册");
+        styleButton(save, ButtonStyle.PRIMARY);
         save.setOnClickListener(v -> {
             String saved = savePreview(bmp);
             if (saved != null) {
@@ -668,22 +718,23 @@ public class StitchActivity extends Activity {
                 status.setText("保存失败");
             }
         });
-        actions.addView(save);
+        addAction(actions, save);
 
         Button close = small("关闭");
         close.setOnClickListener(v -> {
             d.dismiss();
             finish();
         });
-        actions.addView(close);
+        addAction(actions, close);
         box.addView(actions);
 
         // ---- session controls
         LinearLayout session = new LinearLayout(this);
         session.setOrientation(LinearLayout.HORIZONTAL);
-        session.setPadding(dp(8), 0, dp(8), dp(10));
+        session.setPadding(dp(12), 0, dp(12), dp(16));
 
         Button clear = small("清空已截取");
+        styleButton(clear, ButtonStyle.DESTRUCTIVE);
         clear.setOnClickListener(v -> {
             ShotWatcherService.clearCaptured();
             ShotStore.clear(this);

@@ -101,6 +101,47 @@ if "%FAIL%"=="1" exit /b 2
 echo build output dir: %OUT_DIR%
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 
+set "AAPT2=%BUILD_TOOLS%\aapt2.exe"
+set "ZIPALIGN=%BUILD_TOOLS%\zipalign.exe"
+
+rem Some environments (sandboxed workspaces) mark the SDK tree with a Low
+rem mandatory integrity label. A native tool launched from such a directory runs
+rem at Low integrity and cannot write to a normal destination, and aapt2 then
+rem prints the misleading "failed to open file". Probe once; if that happens,
+rem run the native tools from a relocated copy in TEMP, which can write anywhere.
+call :probe_native_tools
+if errorlevel 1 (
+    set "NATIVE_TOOLS_DIR=%TEMP%\stitch-native-%RANDOM%"
+    mkdir "!NATIVE_TOOLS_DIR!" 2>nul
+    copy /y "%AAPT2%" "!NATIVE_TOOLS_DIR!\aapt2.exe" >nul 2>&1
+    copy /y "%ZIPALIGN%" "!NATIVE_TOOLS_DIR!\zipalign.exe" >nul 2>&1
+    set "AAPT2=!NATIVE_TOOLS_DIR!\aapt2.exe"
+    set "ZIPALIGN=!NATIVE_TOOLS_DIR!\zipalign.exe"
+    echo NOTE: aapt2 could not write to %OUT_DIR%
+    echo       running native tools from !NATIVE_TOOLS_DIR! instead
+    call :probe_native_tools
+    if errorlevel 1 (
+        echo ERROR: aapt2 cannot write to %OUT_DIR% and relocating it did not help.
+        echo        Point the build somewhere writable:  build.bat --out DIR
+        exit /b 3
+    )
+)
+
+goto :after_probe
+
+:probe_native_tools
+set "PROBE_DIR=%OUT_DIR%\.tools-probe"
+if exist "%PROBE_DIR%" rmdir /s /q "%PROBE_DIR%"
+mkdir "%PROBE_DIR%" 2>nul
+set "SAMPLE="
+for /r "%ROOT%\res" %%f in (*) do if not defined SAMPLE set "SAMPLE=%%f"
+"%AAPT2%" compile -o "%PROBE_DIR%" "!SAMPLE!" >nul 2>&1
+set "PROBE_RC=%ERRORLEVEL%"
+rmdir /s /q "%PROBE_DIR%" 2>nul
+exit /b %PROBE_RC%
+
+:after_probe
+
 rem wipe stale intermediates
 if exist "%OUT_DIR%\gen"          rmdir /s /q "%OUT_DIR%\gen"
 if exist "%OUT_DIR%\classes"      rmdir /s /q "%OUT_DIR%\classes"
@@ -115,7 +156,7 @@ rem -------------------------------------------------------------------- res
 
 echo ==^> aapt2 compile
 for /r "%ROOT%\res" %%f in (*) do (
-    "%BUILD_TOOLS%\aapt2.exe" compile -o "%OUT_DIR%\res-compiled" "%%f" || exit /b 1
+    "%AAPT2%" compile -o "%OUT_DIR%\res-compiled" "%%f" || exit /b 1
 )
 
 echo ==^> aapt2 link
@@ -125,7 +166,7 @@ if "!FLATS!"=="" (
     echo no resources compiled
     exit /b 1
 )
-"%BUILD_TOOLS%\aapt2.exe" link ^
+"%AAPT2%" link ^
     -o "%OUT_DIR%\res.zip" ^
     -I "%ANDROID_JAR%" ^
     --manifest "%ROOT%\AndroidManifest.xml" ^
@@ -158,7 +199,7 @@ del /q "%OUT_DIR%\classes.txt" 2>nul
 for /r "%OUT_DIR%\classes" %%f in (*.class) do echo %%f>>"%OUT_DIR%\classes.txt"
 set "CLSLIST=%OUT_DIR%\classes.txt"
 pushd "%OUT_DIR%"
-call "%BUILD_TOOLS%\d8.bat" --release --min-api %MIN_SDK% --lib "%ANDROID_JAR%" --output "%OUT_DIR%\dex" "@%CLSLIST%"
+call call "%BUILD_TOOLS%\d8.bat" --release --min-api %MIN_SDK% --lib "%ANDROID_JAR%" --output "%OUT_DIR%\dex" "@%CLSLIST%"
 set "D8RC=%ERRORLEVEL%"
 popd
 if not "%D8RC%"=="0" exit /b 1
@@ -172,17 +213,17 @@ rem ---------------------------------------------------------------- package
 
 echo ==^> package
 del /q "%OUT_DIR%\unsigned.apk" "%OUT_DIR%\aligned.apk" "%OUT_DIR%\SubtitleStitch.apk" 2>nul
-if exist "%OUT_DIR%\pack" rmdir /s /q "%OUT_DIR%\pack"
-mkdir "%OUT_DIR%\pack"
-rem expand the resource apk, add the dex, drop any signature files
-powershell -NoProfile -Command "Expand-Archive -Force -LiteralPath '%OUT_DIR%\res.zip' -DestinationPath '%OUT_DIR%\pack'"
-if exist "%OUT_DIR%\pack\META-INF" rmdir /s /q "%OUT_DIR%\pack\META-INF"
-copy /y "%OUT_DIR%\dex\classes.dex" "%OUT_DIR%\pack\classes.dex" >nul
-powershell -NoProfile -Command "Compress-Archive -Force -Path '%OUT_DIR%\pack\*' -DestinationPath '%OUT_DIR%\unsigned.apk'"
+rem Do NOT unpack and re-zip: aapt2 already stores resources.arsc uncompressed and
+rem aligned. Repacking compresses it again, and such an APK refuses to install on
+rem Android 11+ ("resources.arsc ... stored uncompressed and aligned on a 4-byte
+rem boundary"). Copy the resource apk and just add the dex to it.
+copy /y "%OUT_DIR%\res.zip" "%OUT_DIR%\unsigned.apk" >nul
+powershell -NoProfile -Command ^
+  "Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::Open('%OUT_DIR%\unsigned.apk','Update'); $e=$z.GetEntry('classes.dex'); if($e){$e.Delete()}; [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($z,'%OUT_DIR%\dex\classes.dex','classes.dex',[System.IO.Compression.CompressionLevel]::Optimal); $z.Dispose()"
 if errorlevel 1 exit /b 1
 
 echo ==^> zipalign
-"%BUILD_TOOLS%\zipalign.exe" -p -f 4 "%OUT_DIR%\unsigned.apk" "%OUT_DIR%\aligned.apk"
+"%ZIPALIGN%" -p -f 4 "%OUT_DIR%\unsigned.apk" "%OUT_DIR%\aligned.apk"
 if errorlevel 1 exit /b 1
 
 rem ------------------------------------------------------------------- sign
@@ -199,7 +240,7 @@ if not exist "%KS_PATH%" (
 )
 
 echo ==^> apksigner
-"%BUILD_TOOLS%\apksigner.bat" sign ^
+call "%BUILD_TOOLS%\apksigner.bat" sign ^
     --ks "%KS_PATH%" ^
     --ks-pass "pass:%KS_PASS%" ^
     --ks-key-alias %KS_ALIAS% ^
@@ -212,7 +253,18 @@ echo ==^> apksigner
 if errorlevel 1 exit /b 1
 
 echo ==^> verify
-"%BUILD_TOOLS%\apksigner.bat" verify --print-certs "%OUT_DIR%\SubtitleStitch.apk" >nul
+call "%BUILD_TOOLS%\apksigner.bat" verify --print-certs "%OUT_DIR%\SubtitleStitch.apk" >nul
+if errorlevel 1 exit /b 1
+
+rem resources.arsc must be stored uncompressed and 4-byte aligned, otherwise the
+rem APK refuses to install on Android 11+.
+"%ZIPALIGN%" -c -v 4 "%OUT_DIR%\SubtitleStitch.apk" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: APK is not 4-byte aligned; Android 11+ will reject it.
+    exit /b 1
+)
+powershell -NoProfile -Command ^
+  "Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead('%OUT_DIR%\SubtitleStitch.apk'); $e=$z.GetEntry('resources.arsc'); if(-not $e){Write-Error 'resources.arsc missing'; exit 1}; if($e.CompressedLength -ne $e.Length){Write-Error 'resources.arsc is compressed; Android 11+ will reject this APK'; exit 1}; $z.Dispose()"
 if errorlevel 1 exit /b 1
 
 echo.

@@ -127,14 +127,6 @@ command -v unzip >/dev/null 2>&1 || { echo "unzip not found: install the unzip p
 echo "build output dir: $OUT"
 mkdir -p "$OUT"
 
-# wipe stale intermediates so a failed build cannot mix with a fresh one
-rm -rf "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/res-compiled"
-mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/res-compiled"
-
-# ------------------------------------------------------------------ helpers
-
-step() { printf '==> %s\n' "$1"; }
-
 # aapt2 runs as aapt2 / aapt2.exe depending on the host
 AAPT2="$BUILD_TOOLS/aapt2"
 [ -x "$AAPT2" ] || AAPT2="$BUILD_TOOLS/aapt2.exe"
@@ -144,6 +136,53 @@ APKSIGNER="$BUILD_TOOLS/apksigner"
 [ -x "$APKSIGNER" ] || APKSIGNER="$BUILD_TOOLS/apksigner.bat"
 D8="$BUILD_TOOLS/d8"
 [ -x "$D8" ] || D8="$BUILD_TOOLS/d8.bat"
+
+# Some environments (sandboxed workspaces) mark the SDK tree with a Low
+# mandatory integrity label. A native tool launched from such a directory runs
+# at Low integrity and cannot write to a normal destination -- aapt2 then prints
+# the misleading "failed to open file". Probe once and, if that happens, run the
+# native tools from a relocated copy in the temp dir, which restores their
+# ability to write anywhere.
+NATIVE_TOOLS_DIR=""
+relocate_native_tools() {
+    local dir
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/stitch-native.XXXXXX")"
+    cp "$AAPT2" "$dir/aapt2"
+    cp "$ZIPALIGN" "$dir/zipalign"
+    chmod +x "$dir/aapt2" "$dir/zipalign"
+    NATIVE_TOOLS_DIR="$dir"
+    AAPT2="$dir/aapt2"
+    ZIPALIGN="$dir/zipalign"
+    echo "NOTE: aapt2 could not write to $OUT"
+    echo "      running native tools from $dir instead"
+}
+
+probe_native_tools() {
+    local probe_dir="$OUT/.tools-probe" sample
+    rm -rf "$probe_dir"; mkdir -p "$probe_dir"
+    sample="$(find "$ROOT/res" -type f | head -1)"
+    "$AAPT2" compile -o "$probe_dir" "$sample" >/dev/null 2>&1
+    local rc=$?
+    rm -rf "$probe_dir"
+    return $rc
+}
+
+if ! probe_native_tools; then
+    if ! relocate_native_tools || ! probe_native_tools; then
+        echo "ERROR: aapt2 cannot write to $OUT and relocating it did not help." >&2
+        echo "       Point the build somewhere writable:  ./build.sh --out DIR" >&2
+        exit 3
+    fi
+fi
+
+# wipe stale intermediates so a failed build cannot mix with a fresh one
+rm -rf "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/res-compiled"
+mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/res-compiled"
+
+# ------------------------------------------------------------------ helpers
+
+step() { printf '==> %s\n' "$1"; }
+
 
 # ------------------------------------------------------------------- res
 
@@ -202,16 +241,15 @@ rm -f "$OUT/unsigned.apk" "$OUT/aligned.apk" "$OUT/SubtitleStitch.apk"
 # Repack aapt2's output, replacing compression for resources.arsc (must be
 # STORED and 4-byte aligned, enforced by zipalign afterwards) and adding the dex.
 pack_apk() {
-    # Use zip if available; otherwise fall back to java's jar tool.
-    local tmp="$OUT/pack"
-    rm -rf "$tmp"; mkdir -p "$tmp"
-    (cd "$tmp" && unzip -q "$OUT/res.zip")
-    rm -rf "$tmp/META-INF"
-    cp "$OUT/dex/classes.dex" "$tmp/classes.dex"
-    (cd "$tmp" && zip -q -r -X "$OUT/unsigned.apk" . )
-    rm -rf "$tmp"
+    # Do NOT unpack and re-zip: aapt2 already stores resources.arsc
+    # uncompressed and aligned, and repacking would compress it again, which
+    # makes the APK refuse to install on Android 11+ ("resources.arsc ... stored
+    # uncompressed and aligned on a 4-byte boundary"). Simply append the dex.
+    cp "$OUT/res.zip" "$OUT/unsigned.apk"
+    ( cd "$OUT/dex" && zip -q -j -X "$OUT/unsigned.apk" classes.dex )
+    # drop any signature files aapt2 may have carried over
+    zip -q -d "$OUT/unsigned.apk" 'META-INF/*' >/dev/null 2>&1 || true
 }
-pack_apk
 
 step "zipalign"
 "$ZIPALIGN" -p -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
@@ -251,6 +289,19 @@ step "apksigner"
 
 step "verify"
 "$APKSIGNER" verify --print-certs "$OUT/SubtitleStitch.apk" >/dev/null
+
+# resources.arsc must be stored uncompressed and 4-byte aligned, otherwise the
+# APK refuses to install on Android 11+ with:
+#   "Targeting R+ requires the resources.arsc ... stored uncompressed and
+#    aligned on a 4-byte boundary"
+if ! unzip -v "$OUT/SubtitleStitch.apk" resources.arsc | grep -q Stored; then
+    echo "ERROR: resources.arsc is compressed; Android 11+ will reject this APK." >&2
+    exit 1
+fi
+if ! "$ZIPALIGN" -c -v 4 "$OUT/SubtitleStitch.apk" >/dev/null 2>&1; then
+    echo "ERROR: APK is not 4-byte aligned; Android 11+ will reject it." >&2
+    exit 1
+fi
 
 size="$(wc -c < "$OUT/SubtitleStitch.apk" | tr -d ' ')"
 kind="debug"; [ "$RELEASE" -eq 1 ] && kind="release"

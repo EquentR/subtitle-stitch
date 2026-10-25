@@ -3,7 +3,11 @@ package com.equentr.subtitlestitch;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -12,7 +16,6 @@ import android.view.Window;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -35,6 +38,12 @@ public class MainActivity extends Activity {
     private Button openFromCaptured;
     private Button projectionBtn;
     private Button bubbleBtn;
+    private TextView capturedText;
+    private TextView captureHint;
+    private Button permissionBtn;
+    private Button clearBtn;
+    private Button pickBtn;
+    private String lastUiState;
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
 
     /** Set while the system capture-consent dialog is on screen. */
@@ -80,7 +89,10 @@ public class MainActivity extends Activity {
             }
             awaitingProjection = true;
             startActivityForResult(mgr.createScreenCaptureIntent(), REQ_PROJECTION);
+            refreshState();
         } catch (Exception e) {
+            awaitingProjection = false;
+            refreshState();
             toast("无法请求屏幕捕捉权限");
         }
     }
@@ -224,102 +236,110 @@ public class MainActivity extends Activity {
 
     private View buildUi() {
         ScrollView scroller = new ScrollView(this);
+        scroller.setFillViewport(true);
+        scroller.setClipToPadding(true);
+        scroller.setBackgroundColor(cPage());
+        scroller.setVerticalScrollBarEnabled(false);
+
+        // Insets belong to the viewport, so the last action scrolls above system bars.
+        scroller.setOnApplyWindowInsetsListener((v, insets) -> {
+            int left, top, right, bottom;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars()
+                                | android.view.WindowInsets.Type.displayCutout());
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = bars.bottom;
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            v.setPadding(left, top, right, bottom);
+            return insets.consumeSystemWindowInsets();
+        });
+        // Center a readable column on tablets; calculate from the measured viewport
+        // so rotations and split-screen resizing need no Activity recreation.
+        android.widget.FrameLayout frame = new android.widget.FrameLayout(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        // Pad by the system-bar insets so the content never slides under the
-        // status bar (edge-to-edge is the default from targetSdk 35 onward).
-        int baseTop = dp(24);
-        int baseBottom = dp(24);
-        root.setPadding(dp(20), baseTop, dp(20), baseBottom);
-        root.setBackgroundColor(cPage());
-        if (Build.VERSION.SDK_INT >= 23) {
-            root.setOnApplyWindowInsetsListener((v, insets) -> {
-                android.graphics.Insets bars = android.graphics.Insets.NONE;
-                if (Build.VERSION.SDK_INT >= 30) {
-                    bars = insets.getInsets(
-                            android.view.WindowInsets.Type.statusBars()
-                                    | android.view.WindowInsets.Type.navigationBars()
-                                    | android.view.WindowInsets.Type.displayCutout());
-                } else {
-                    bars = android.graphics.Insets.of(
-                            insets.getSystemWindowInsetLeft(),
-                            insets.getSystemWindowInsetTop(),
-                            insets.getSystemWindowInsetRight(),
-                            insets.getSystemWindowInsetBottom());
-                }
-                v.setPadding(dp(20) + bars.left, baseTop + bars.top,
-                        dp(20) + bars.right, baseBottom + bars.bottom);
-                return insets;
-            });
-        }
-        scroller.addView(root);
+        root.setPadding(dp(20), dp(28), dp(20), dp(24));
+        android.widget.FrameLayout.LayoutParams contentParams = new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        frame.addView(root, contentParams);
+        frame.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            int width = Math.min(r - l, dp(640));
+            if (width > 0 && root.getLayoutParams().width != width) {
+                root.getLayoutParams().width = width;
+                root.requestLayout();
+            }
+        });
+        scroller.addView(frame);
 
-        TextView title = new TextView(this);
-        title.setText("字幕拼接");
-        title.setTextSize(24);
-        title.setTextColor(cText());
-        title.setGravity(Gravity.START);
+        TextView eyebrow = label("SUBTITLE STITCH", 11, cAccent());
+        eyebrow.setLetterSpacing(0.16f);
+        eyebrow.setTypeface(null, Typeface.BOLD);
+        root.addView(eyebrow);
+        TextView title = label("字幕拼接", 30, cText());
+        title.setTypeface(null, Typeface.BOLD);
+        title.setPadding(0, dp(6), 0, dp(6));
+        title.setAccessibilityHeading(true);
         root.addView(title);
+        TextView subtitle = label("把喜欢的台词，连成一张长图。", 14, cSubtle());
+        subtitle.setPadding(0, 0, 0, dp(24));
+        root.addView(subtitle);
 
-        TextView sub = new TextView(this);
-        sub.setText("把多张截图纵向拼成一张长图，保留台词字幕");
-        sub.setTextSize(13);
-        sub.setTextColor(cSubtle());
-        sub.setPadding(0, dp(4), 0, dp(18));
-        root.addView(sub);
+        LinearLayout stitch = card(root);
+        stitch.setBackground(rounded(isDark() ? Color.parseColor("#192A42")
+                : Color.parseColor("#EAF2FF"), 24));
+        heading(stitch, "开始创作", "选择截图，裁出字幕，再拼成一张长图。");
+        capturedText = label("", 36, cAccent());
+        capturedText.setTypeface(null, Typeface.BOLD);
+        capturedText.setPadding(0, dp(16), 0, 0);
+        stitch.addView(capturedText);
+        captureHint = label("", 13, cSubtle());
+        captureHint.setPadding(0, dp(2), 0, dp(8));
+        stitch.addView(captureHint);
+        openFromCaptured = button("拼接已捕获的截图", true);
+        openFromCaptured.setOnClickListener(v -> openEditor(true));
+        stitch.addView(openFromCaptured);
+        pickBtn = button("从相册选择图片", false);
+        pickBtn.setOnClickListener(v -> openEditor(false));
+        stitch.addView(pickBtn);
+        clearBtn = button("清空捕获记录", false);
+        clearBtn.setOnClickListener(v -> confirmClear());
+        styleQuiet(clearBtn);
+        stitch.addView(clearBtn);
 
-        // ---- permission card
-        LinearLayout card = card(root);
-        TextView permTitle = new TextView(this);
-        permTitle.setText("① 所需权限");
-        permTitle.setTextSize(15);
-        permTitle.setTextColor(cText());
-        card.addView(permTitle);
-
-        statusText = new TextView(this);
-        statusText.setTextSize(13);
-        statusText.setTextColor(cSubtle());
-        statusText.setPadding(0, dp(6), 0, dp(10));
-        card.addView(statusText);
-
-        Button btnPerm = button("授予权限", false);
-        btnPerm.setOnClickListener(v -> requestAllPermissions());
-        card.addView(btnPerm);
-
-        // ---- watcher card
-        LinearLayout card2 = card(root);
-        TextView watchTitle = new TextView(this);
-        watchTitle.setText("② 自动捕获截图");
-        watchTitle.setTextSize(15);
-        watchTitle.setTextColor(cText());
-        card2.addView(watchTitle);
-
-        TextView watchDesc = new TextView(this);
-        watchDesc.setText("开启后会在后台监听新截图，并弹出悬浮球提醒");
-        watchDesc.setTextSize(13);
-        watchDesc.setTextColor(cSubtle());
-        watchDesc.setPadding(0, dp(6), 0, dp(10));
-        card2.addView(watchDesc);
-
-        watchStateText = new TextView(this);
-        watchStateText.setTextSize(13);
-        watchStateText.setTextColor(Color.parseColor("#1B1F24"));
-        watchStateText.setPadding(0, 0, 0, dp(6));
-        card2.addView(watchStateText);
-
-        watchToggleBtn = button("开启监听", true);
+        LinearLayout watcher = card(root);
+        heading(watcher, "自动收集截图", "开启监听后，在其他 App 截图会自动收集到这里。");
+        watchStateText = label("", 12, cSubtle());
+        watchStateText.setPadding(dp(12), dp(7), dp(12), dp(7));
+        LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        stateParams.topMargin = dp(14);
+        watcher.addView(watchStateText, stateParams);
+        watchToggleBtn = button("开启监听", false);
         watchToggleBtn.setOnClickListener(v -> toggleWatch());
-        card2.addView(watchToggleBtn);
+        watcher.addView(watchToggleBtn);
 
-        // Quick-settings tile shortcut. On API 33+ we can ask the system to
-        // offer the tile; otherwise the user adds it manually.
-        // MediaProjection consent: needed for the bubble's own capture button.
-        projectionBtn = button("授权悬浮球自动截图", false);
-        projectionBtn.setOnClickListener(v -> requestProjection());
-        card2.addView(projectionBtn);
+        LinearLayout permissions = card(root);
+        heading(permissions, "权限与准备", "读取图片用于收集截图；悬浮窗权限用于显示悬浮球。");
+        statusText = label("", 13, cSubtle());
+        statusText.setLineSpacing(dp(5), 1f);
+        statusText.setPadding(0, dp(12), 0, dp(4));
+        permissions.addView(statusText);
+        permissionBtn = button("授予所需权限", false);
+        permissionBtn.setOnClickListener(v -> requestAllPermissions());
+        permissions.addView(permissionBtn);
 
-        // Manual bubble switch: no need to hunt through the notification shade.
-        bubbleBtn = button("显示悬浮窗", false);
+        LinearLayout tools = card(root);
+        heading(tools, "悬浮球与快捷操作", "离开 App 后，用悬浮球截图或快速进入拼接。");
+        bubbleBtn = button("开启悬浮球", false);
         bubbleBtn.setOnClickListener(v -> {
             boolean on = ShotStore.isBubbleEnabled(this);
             if (!on && !BubbleService.canDrawOverlays(this)) {
@@ -336,47 +356,51 @@ public class MainActivity extends Activity {
             }
             refreshState();
         });
-        card2.addView(bubbleBtn);
-
-        Button tileBtn = button("添加到控制中心快捷开关", false);
+        tools.addView(bubbleBtn);
+        projectionBtn = button("授权悬浮球截图", false);
+        projectionBtn.setOnClickListener(v -> requestProjection());
+        tools.addView(projectionBtn);
+        TextView consentHint = label("屏幕截图授权在会话结束后需重新开启。", 12, cSubtle());
+        consentHint.setPadding(dp(4), dp(8), dp(4), dp(4));
+        tools.addView(consentHint);
+        Button tileBtn = button("添加控制中心快捷开关", false);
         tileBtn.setOnClickListener(v -> {
             WatchTileService.requestAddTile(this);
             toast("下拉控制中心 → 编辑 → 添加「字幕拼接」");
         });
-        card2.addView(tileBtn);
+        tools.addView(tileBtn);
 
-        // ---- stitch card
-        LinearLayout card3 = card(root);
-        TextView stitchTitle = new TextView(this);
-        stitchTitle.setText("③ 开始拼接");
-        stitchTitle.setTextSize(15);
-        stitchTitle.setTextColor(cText());
-        card3.addView(stitchTitle);
-
-        openFromCaptured = button("拼接已捕获的截图", true);
-        openFromCaptured.setOnClickListener(v -> {
-            Intent i = new Intent(this, StitchActivity.class);
-            i.putExtra(StitchActivity.EXTRA_FROM_CAPTURED, true);
-            startActivity(i);
-        });
-        card3.addView(openFromCaptured);
-
-        Button pick = button("从相册选择图片", false);
-        pick.setOnClickListener(v -> {
-            Intent i = new Intent(this, StitchActivity.class);
-            i.putExtra(StitchActivity.EXTRA_FROM_CAPTURED, false);
-            startActivity(i);
-        });
-        card3.addView(pick);
-
-        // Let the user drop the captured list. Necessary because screenshots can
-        // be deleted from the gallery while we still hold their MediaStore ids;
-        // opening the editor then fails to load and looks broken.
-        Button clear = button("清空已捕获的截图", false);
-        clear.setOnClickListener(v -> confirmClear());
-        card3.addView(clear);
-
+        TextView footer = label("截图 → 调整字幕区域 → 预览保存", 12, cSubtle());
+        footer.setGravity(Gravity.CENTER);
+        footer.setPadding(0, dp(8), 0, dp(8));
+        root.addView(footer);
+        scroller.requestApplyInsets();
         return scroller;
+    }
+
+    private void openEditor(boolean fromCaptured) {
+        Intent intent = new Intent(this, StitchActivity.class);
+        intent.putExtra(StitchActivity.EXTRA_FROM_CAPTURED, fromCaptured);
+        startActivity(intent);
+    }
+
+    private TextView label(String text, float size, int color) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        return view;
+    }
+
+    private void heading(LinearLayout parent, String title, String description) {
+        TextView heading = label(title, 18, cText());
+        heading.setTypeface(null, Typeface.BOLD);
+        heading.setAccessibilityHeading(true);
+        parent.addView(heading);
+        TextView detail = label(description, 13, cSubtle());
+        detail.setPadding(0, dp(6), 0, 0);
+        detail.setLineSpacing(dp(3), 1f);
+        parent.addView(detail);
     }
 
     private void confirmClear() {
@@ -422,37 +446,73 @@ public class MainActivity extends Activity {
         ui.postDelayed(this::refreshState, 600);
     }
 
-    private LinearLayout card(LinearLayout parent) {        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundColor(cCard());
-        c.setPadding(dp(16), dp(16), dp(16), dp(16));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+    private int cAccent() {
+        return Color.parseColor(isDark() ? "#A5C8FF" : "#245DC1");
+    }
+
+    private int cSoft() {
+        return Color.parseColor(isDark() ? "#273345" : "#EFF3F9");
+    }
+
+    private GradientDrawable rounded(int color, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radius));
+        return drawable;
+    }
+
+    private LinearLayout card(LinearLayout parent) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable background = rounded(cCard(), 24);
+        background.setStroke(dp(1), Color.parseColor(isDark() ? "#30363E" : "#E3E8EF"));
+        card.setBackground(background);
+        card.setPadding(dp(20), dp(20), dp(20), dp(16));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(14);
-        parent.addView(c, lp);
-        return c;
+        params.bottomMargin = dp(16);
+        parent.addView(card, params);
+        return card;
     }
 
     private Button button(String text, boolean primary) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setAllCaps(false);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
-        lp.topMargin = dp(8);
-        b.setLayoutParams(lp);
-        if (primary) {
-            b.setBackgroundColor(Color.parseColor("#1F6FEB"));
-            b.setTextColor(Color.WHITE);
-        } else {
-            // Secondary buttons need their own dark-mode tint; a fixed light blue
-            // looked out of place on the dark background.
-            b.setBackgroundColor(isDark()
-                    ? Color.parseColor("#232A33") : Color.parseColor("#E8EEF9"));
-            b.setTextColor(isDark()
-                    ? Color.parseColor("#8AB4F8") : Color.parseColor("#1F6FEB"));
-        }
-        return b;
+        Button button = new Button(this);
+        button.setText(text);
+        button.setAllCaps(false);
+        button.setTextSize(14);
+        button.setTypeface(null, Typeface.BOLD);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(dp(52));
+        button.setMinimumHeight(dp(52));
+        button.setPadding(dp(16), dp(12), dp(16), dp(12));
+        // Wrap content keeps labels visible with large accessibility font sizes.
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(10);
+        button.setLayoutParams(params);
+        button.setStateListAnimator(null);
+        styleButton(button, primary);
+        return button;
+    }
+
+    private void styleButton(Button button, boolean primary) {
+        int fill = primary ? Color.parseColor("#245DC1") : cSoft();
+        int foreground = primary ? Color.WHITE : cAccent();
+        ColorStateList colors = new ColorStateList(
+                new int[][] {new int[] {-android.R.attr.state_enabled}, new int[] {}},
+                new int[] {cSubtle(), foreground});
+        button.setTextColor(colors);
+        button.setBackgroundTintList(null);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(
+                isDark() ? 0x33FFFFFF : 0x220F3F80), rounded(fill, 14), null));
+        button.setAlpha(button.isEnabled() ? 1f : 0.5f);
+    }
+
+    private void styleQuiet(Button button) {
+        styleButton(button, false);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(
+                isDark() ? 0x33FFFFFF : 0x220F3F80), rounded(Color.TRANSPARENT, 14), null));
+        button.setTextColor(cSubtle());
     }
 
     private void refreshState() {
@@ -461,51 +521,39 @@ public class MainActivity extends Activity {
         }
         boolean media = MediaStoreUtil.canReadImages(this);
         boolean overlay = BubbleService.canDrawOverlays(this);
-        StringBuilder sb = new StringBuilder();
-        sb.append(media ? "✓ 读取图片" : "✗ 读取图片（必需）");
-        sb.append("\n");
-        sb.append(overlay ? "✓ 悬浮窗" : "✗ 悬浮窗（悬浮球需要）");
-        statusText.setText(sb.toString());
-        // Authoritative running state: ask the system, not a static flag that a
-        // process restart would have cleared.
+        boolean notifications = Build.VERSION.SDK_INT < 33 || hasNotif();
         boolean running = isServiceActuallyRunning();
         ShotWatcherService.isRunning = running;
-        if (watchToggleBtn != null) {
-            watchToggleBtn.setText(running ? "停止监听" : "开启监听");
-            watchToggleBtn.setBackgroundColor(running
-                    ? Color.parseColor("#E8EEF9") : Color.parseColor("#1F6FEB"));
-            watchToggleBtn.setTextColor(running
-                    ? Color.parseColor("#1F6FEB") : Color.WHITE);
+        int count = ShotWatcherService.capturedCount();
+        boolean bubble = ShotStore.isBubbleEnabled(this);
+        boolean consent = ScreenCapture.hasConsent(this);
+        String state = media + ":" + overlay + ":" + notifications + ":" + running
+                + ":" + count + ":" + bubble + ":" + consent + ":" + awaitingProjection;
+        if (state.equals(lastUiState)) {
+            return;
         }
-        if (watchStateText != null) {
-            int n = ShotWatcherService.capturedCount();
-            if (running) {
-                watchStateText.setText("状态：监听中 · 已捕获 " + n + " 张");
-                watchStateText.setTextColor(Color.parseColor("#1F6FEB"));
-            } else {
-                watchStateText.setText("状态：未开启");
-                watchStateText.setTextColor(cSubtle());
-            }
-        }
-        if (bubbleBtn != null) {
-            boolean on = ShotStore.isBubbleEnabled(this);
-            bubbleBtn.setText(on ? "✓ 悬浮窗已开启（点按关闭）" : "显示悬浮窗");
-            bubbleBtn.setBackgroundColor(isDark()
-                    ? Color.parseColor("#232A33") : Color.parseColor("#E8EEF9"));
-            bubbleBtn.setTextColor(isDark()
-                    ? Color.parseColor("#8AB4F8") : Color.parseColor("#1F6FEB"));
-        }
-        if (projectionBtn != null) {
-            projectionBtn.setText(ScreenCapture.hasConsent(this)
-                    ? "✓ 已授权自动截图（重启 App 后需重新授权）"
-                    : "授权悬浮球自动截图");
-        }
-        if (openFromCaptured != null) {
-            int n = ShotWatcherService.capturedCount();
-            openFromCaptured.setText(n > 0
-                    ? ("拼接已捕获的截图（" + n + " 张）")
-                    : "拼接已捕获的截图");
-        }
+        lastUiState = state;
+        statusText.setText((media ? "✓  读取图片已授权" : "○  读取图片 · 监听截图需要")
+                + "\n" + (overlay ? "✓  悬浮窗已授权" : "○  悬浮窗 · 使用悬浮球需要")
+                + (Build.VERSION.SDK_INT >= 33 ? "\n" + (notifications
+                        ? "✓  通知已授权" : "○  通知 · 后台状态提醒") : ""));
+        permissionBtn.setVisibility(media && overlay && notifications ? View.GONE : View.VISIBLE);
+        capturedText.setText(count + " 张截图");
+        captureHint.setText(count > 0 ? "已准备好，继续拼接你的台词长图" : "暂无捕获截图，可以先从相册选择");
+        openFromCaptured.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+        styleButton(pickBtn, count == 0);
+        clearBtn.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+        watchToggleBtn.setText(running ? "停止监听" : "开启截图监听");
+        styleButton(watchToggleBtn, false);
+        watchStateText.setText(running ? "●  正在监听新截图" : "○  监听未开启");
+        watchStateText.setTextColor(running
+                ? Color.parseColor(isDark() ? "#8DDBB7" : "#226548") : cSubtle());
+        watchStateText.setBackground(rounded(running
+                ? Color.parseColor(isDark() ? "#203C32" : "#E6F4EC") : cSoft(), 10));
+        bubbleBtn.setText(bubble ? "悬浮球已开启 · 点按关闭" : "开启悬浮球");
+        projectionBtn.setText(consent ? "✓ 已授权悬浮球截图" : "授权悬浮球截图");
+        projectionBtn.setEnabled(!consent && !awaitingProjection);
+        styleButton(projectionBtn, false);
     }
 
     private String mediaPermission() {
